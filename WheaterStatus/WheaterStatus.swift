@@ -604,6 +604,20 @@ struct LiveActivityLockScreenView: View {
 
                 Spacer()
 
+                // 最近一次刷新结果标签（已更新 / 无数据更新）：随数据指纹一并下发，
+                // 已更新为绿色，无数据更新弱化为次级色
+                if let notice = state.refreshNotice, !notice.isEmpty {
+                    Text(notice)
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundStyle(notice == "已更新" ? Color.green : theme.textSoft.opacity(0.8))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 2)
+                        .background((notice == "已更新" ? Color.green : theme.textSoft).opacity(theme.isDark ? 0.15 : 0.10))
+                        .clipShape(Capsule())
+                }
+
                 HStack(spacing: 3) {
                     Image(systemName: "clock")
                         .font(.system(size: 7.5))

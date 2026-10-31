@@ -14,6 +14,34 @@ import BackgroundTasks
 import WidgetKit
 import CoreLocation
 
+/// 刷新结果 / 同行事件横幅模型：kind 决定图标与色调，id 驱动横幅 UI 重新计时自动消失
+struct NIOTransientNotice: Identifiable, Equatable {
+    enum Kind {
+        /// 绿色 ✓ 数据有更新 / 正向结果
+        case success
+        /// 中性 无数据更新
+        case neutral
+        /// 橙色 警示（如到达但未上锁）
+        case warn
+        /// 主题色 一般提示（如开始同行）
+        case info
+
+        var icon: String {
+            switch self {
+            case .success: return "checkmark.circle.fill"
+            case .neutral: return "tray.full.fill"
+            case .warn: return "exclamationmark.triangle.fill"
+            case .info: return "location.car.fill"
+            }
+        }
+    }
+
+    let id = UUID()
+    let kind: Kind
+    let message: String
+    let at = Date()
+}
+
 @MainActor
 final class NIOService: ObservableObject {
     static let shared = NIOService()
@@ -95,6 +123,15 @@ final class NIOService: ObservableObject {
     }
     private static let lastVehicleFetchKey = "nio_last_vehicle_fetch_time"
     @Published var is403Detected = false
+
+    /// 刷新结果横幅（主界面顶部自动消失）：
+    /// 进后台/回前台触发的刷新与手动刷新会 announce，后台定时轮询静默不打扰
+    @Published var transientNotice: NIOTransientNotice?
+
+    /// 发布一条临时横幅；新横幅直接替换旧横幅（横幅 UI 依 id 自动重新计时消失）
+    func publishTransientNotice(_ kind: NIOTransientNotice.Kind, _ message: String) {
+        transientNotice = NIOTransientNotice(kind: kind, message: message)
+    }
 
     var isConfigured: Bool {
         if !nioVehicleAccessToken.isEmpty {
@@ -229,12 +266,16 @@ final class NIOService: ObservableObject {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            // 后台定位保活激活时，轮询定时器继续在后台跑（车况准实时）；
-            // 未开保活则暂停轮询，杜绝后台无效网络唤醒与并发冲突
-            guard !NIOLocationKeepAlive.shared.isKeepingAlive else { return }
             MainActor.assumeIsolated {
-                self?.vehicleTimer?.invalidate()
-                self?.vehicleTimer = nil
+                guard let self else { return }
+                // 进入后台立即拉一轮车况（亮屏切聊天 / 锁屏都会走到这里），
+                // 保证锁屏瞬间数据尽量新；结果经横幅反馈，下次回前台可见
+                Task { await self.fetchVehicle(force: false, announce: true) }
+                // 后台定位保活激活时，轮询定时器继续在后台跑（车况准实时）；
+                // 未开保活则暂停轮询，杜绝后台无效网络唤醒与并发冲突
+                guard !NIOLocationKeepAlive.shared.isKeepingAlive else { return }
+                self.vehicleTimer?.invalidate()
+                self.vehicleTimer = nil
             }
         }
 
@@ -243,13 +284,16 @@ final class NIOService: ObservableObject {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            // 回到前台后平滑恢复调度，若数据已超 2 分钟则轻量刷新一次
+            // 回到前台后平滑恢复调度；与上一次成功拉取间隔 ≥ 60 秒即刷新一次（含横幅反馈）
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
                 guard let self = self else { return }
                 // 控制胶囊上岛接力：回前台先消费 Widget 扩展写入的快速上岛请求
                 self.checkPendingIslandRaise()
-                if let last = self.lastVehicleFetch, Date().timeIntervalSince(last) > 120 {
-                    Task { [weak self] in await self?.fetchVehicle(force: false) }
+                // 刷新节流以上一次"实际发起且成功"的拉取为准（lastFetchTimestamp），
+                // 而非界面更新时间——后者现在只在数据变化时才推进
+                let lastAttempt = self.lastFetchTimestamp ?? self.lastVehicleFetch
+                if lastAttempt == nil || Date().timeIntervalSince(lastAttempt!) >= 60 {
+                    Task { [weak self] in await self?.fetchVehicle(force: false, announce: true) }
                 }
                 self.scheduleNextVehiclePoll()
             }
@@ -297,9 +341,10 @@ final class NIOService: ObservableObject {
     // MARK: - 刷新全部
 
     /// 全量刷新。轮询走默认 force=false（change/checkin 受节流），用户手动刷新传 force=true。
-    func refreshAll(force: Bool = false) {
+    /// announce = true 时拉取结束弹横幅反馈「数据已更新 / 无数据更新」（进后台/回前台/手动刷新）。
+    func refreshAll(force: Bool = false, announce: Bool = false) {
         Task {
-            async let v: () = fetchVehicle(force: force)
+            async let v: () = fetchVehicle(force: force, announce: announce)
             async let c: () = fetchChange(force: force)
             async let k: () = fetchCheckin(force: force)
             _ = await (v, c, k)
@@ -313,7 +358,9 @@ final class NIOService: ObservableObject {
     // 链路 1 (Widget 动态签名接口): 专精拉取实时 SOC 电量、充电状态/功率、行车状态、车辆闭锁、实时定位与温度 (动态签名永不过期)
     // 链路 2 (RVS 全量遥测接口): 专精拉取 4 轮胎压/胎温、车机固件 FOTA、12V 小电瓶电压/电量、7门车窗天窗开度全景、车外灯光、座椅方向盘加热、车载冰箱、离车守卫/露营/宠物模式
 
-    func fetchVehicle(force: Bool = false) async {
+    /// announce = true 时，无论数据是否变化都在拉取结束后发布横幅（数据已更新 / 无数据更新 / 拉取失败）。
+    /// 后台定时轮询保持 announce=false 静默，避免高频打扰。
+    func fetchVehicle(force: Bool = false, announce: Bool = false) async {
         guard isConfigured else { return }
         guard !isLoadingVehicle else {
             // 从小组件进入时可能正赶上后台轮询在跑，静默丢弃会导致"卡住"。
@@ -379,21 +426,41 @@ final class NIOService: ObservableObject {
 
         // 3. 智能融合两路 API 数据与持久化落盘缓存 (Smart Merge)
         if widgetStatus != nil || rvsStatus != nil {
+            // 数据变化检测：以融合前旧状态为基线，显著内容指纹一致 = 本次拉取无新数据。
+            // 只有真实变化才更新主界面"更新时间"，避免无变化轮次把时间伪刷成"现在"。
+            let previousFingerprint = NIOVehicleLib.statusFingerprint(self.vehicleData?.data?.status)
             let merged = mergeVehicleStatus(widget: widgetStatus, rvs: rvsStatus)
+            let newFingerprint = NIOVehicleLib.statusFingerprint(merged.data?.status)
+            let dataChanged = newFingerprint != previousFingerprint
+
             self.vehicleData = merged
-            self.lastVehicleFetch = Date()
+            if dataChanged || lastVehicleFetch == nil {
+                self.lastVehicleFetch = Date()
+            }
             self.lastFetchTimestamp = Date()
             self.lastError = nil
             self.is403Detected = false
 
-            // 同步刷新 iOS 灵动岛与锁屏实时活动
-            self.updateLiveActivity()
+            if announce {
+                publishTransientNotice(
+                    dataChanged ? .success : .neutral,
+                    dataChanged ? "当前记录数据已更新" : "当前记录无数据更新"
+                )
+            }
+
+            // 同步刷新 iOS 灵动岛与锁屏实时活动（携带刷新结果标签，Widget 同步下发）
+            self.updateLiveActivity(notice: dataChanged ? "已更新" : "无数据更新")
 
             // 异步持久化到本地
             saveJSONAsync(merged, to: vehicleFile)
             appendSnapshot(merged)
-        } else if self.vehicleData == nil {
-            self.lastError = "车辆数据拉取失败，请在蔚来 App 爱车页下拉刷新后重新嗅探"
+        } else {
+            if self.vehicleData == nil {
+                self.lastError = "车辆数据拉取失败，请在蔚来 App 爱车页下拉刷新后重新嗅探"
+            }
+            if announce {
+                publishTransientNotice(.warn, "车况拉取失败 · 稍后自动重试")
+            }
         }
     }
 
@@ -508,12 +575,47 @@ final class NIOService: ObservableObject {
     /// Token 过期/失效提醒：点亮"凭证失效"状态 + 明确文案 + 警示触感。
     /// 此前 401/403 只写入拉取日志即静默返回，状态点/退避/横幅全部不触发；
     /// 修复成功后由 fetchVehicle 成功分支自动复位（is403Detected = false + lastError = nil）。
-    private func noteAuthFailure(_ statusCode: Int) {
+    ///
+    /// 403 ≠ Token 失效：签名/时间戳过期、风控拦截同样返回 403，而 Token 实际仍有效
+    /// （佐证：蔚来 App 刷新后 SR 抓到的 Token 未变化）。这里按响应体关键词分类：
+    /// - 签名/时间戳类 → 不点亮失效状态，提示补抓 sign_secret
+    /// - 风控/WAF 拦截类 → 不点亮失效状态，提示稍后自动恢复
+    /// - 鉴权类 / 无响应体 → 按 Token 失效处理（保持统一 401/403 检测约定）
+    private func noteAuthFailure(_ statusCode: Int, body: String? = nil) {
         guard statusCode == 401 || statusCode == 403 else { return }
+        let blob = (body ?? "").lowercased()
+        let detail = extractErrorDetail(from: body)
+
+        if blob.contains("sign") || blob.contains("timestamp") || blob.contains("签名") || blob.contains("时间戳") {
+            lastError = "接口签名/时间戳校验被拒（HTTP \(statusCode)）· Token 仍有效，补抓 sign_secret 后自动恢复\(detail)"
+            return
+        }
+        if blob.contains("<html") || blob.contains("<!doctype") {
+            lastError = "请求被网关/WAF 拦截（HTTP \(statusCode)）· Token 仍有效，稍后自动重试\(detail)"
+            return
+        }
+        if blob.contains("risk") || blob.contains("captcha") || blob.contains("风控") {
+            lastError = "请求被风控拦截（HTTP \(statusCode)）· Token 仍有效，稍后自动重试\(detail)"
+            return
+        }
         guard !is403Detected else { return }
         is403Detected = true
-        lastError = "蔚来 Token 已失效（HTTP \(statusCode)），自动刷新已降频为 15 分钟重试 · 请重新嗅探并更新 Token"
+        lastError = "蔚来 Token 已失效（HTTP \(statusCode)），自动刷新已降频为 15 分钟重试 · 打开蔚来 App 爱车页下拉刷新即可自动更新，无需重新登录\(detail)"
         UINotificationFeedbackGenerator().notificationOccurred(.error)
+    }
+
+    /// 从 401/403 响应体提取 resultCode / errorMsg 供诊断展示；无法解析时展示原文前 80 字符
+    private func extractErrorDetail(from body: String?) -> String {
+        guard let body, !body.isEmpty else { return "" }
+        guard let json = (try? JSONSerialization.jsonObject(with: Data(body.utf8))) as? [String: Any] else {
+            return " · 响应: \(body.prefix(80))"
+        }
+        let code = (json["resultCode"] as? String) ?? ""
+        let msg = (json["errorMsg"] as? String) ?? (json["message"] as? String) ?? ""
+        var parts: [String] = []
+        if !code.isEmpty { parts.append("code=\(code)") }
+        if !msg.isEmpty { parts.append("msg=\(msg)") }
+        return parts.isEmpty ? "" : " · \(parts.joined(separator: " "))"
     }
 
     private func fetchWidgetData(url: URL, token: String) async -> NIOVehicleStatus? {
@@ -534,9 +636,28 @@ final class NIOService: ObservableObject {
         appendLog(logEntry)
 
         do {
-            let (data, response) = try await urlSession.data(for: req)
+            var (data, response) = try await urlSession.data(for: req)
+            var text = String(data: data, encoding: .utf8) ?? ""
+
+            // 时间戳过期自愈：部分蔚来网关只校验时间戳新鲜度、不校验 sign 与 timestamp 绑定
+            // （ha-nio 实证）。401/403 且 URL 带时间戳时，本地刷新 timestamp 保留原 sign 重试一次；
+            // 若服务端同时校验绑定则重试仍被拒，回退为原失败上报，无额外副作用。
+            if let http = response as? HTTPURLResponse,
+               http.statusCode == 401 || http.statusCode == 403,
+               let freshStr = NIOVehicleLib.refreshTimestampParam(in: url.absoluteString),
+               let freshURL = URL(string: freshStr) {
+                var retryReq = req
+                retryReq.url = freshURL
+                applyDeviceFingerprint(to: &retryReq, url: freshURL)
+                let (rData, rResponse) = try await urlSession.data(for: retryReq)
+                if let rHttp = rResponse as? HTTPURLResponse {
+                    data = rData
+                    response = rHttp
+                    text = String(data: rData, encoding: .utf8) ?? ""
+                }
+            }
+
             guard let http = response as? HTTPURLResponse else { return nil }
-            let text = String(data: data, encoding: .utf8) ?? ""
             if http.statusCode == 200, let rawJson = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
                 let norm = RVSRormalizer.normalize(rawJson)
                 let normData = try JSONSerialization.data(withJSONObject: norm)
@@ -545,7 +666,7 @@ final class NIOService: ObservableObject {
                 return decoded.data?.status
             } else {
                 updateLog(logEntry, statusCode: http.statusCode, preview: String(text.prefix(200)))
-                noteAuthFailure(http.statusCode)
+                noteAuthFailure(http.statusCode, body: text)
             }
         } catch {
             updateLog(logEntry, statusCode: nil, preview: error.localizedDescription)
@@ -574,9 +695,26 @@ final class NIOService: ObservableObject {
         appendLog(logEntry)
 
         do {
-            let (data, response) = try await urlSession.data(for: req)
+            var (data, response) = try await urlSession.data(for: req)
+            var text = String(data: data, encoding: .utf8) ?? ""
+
+            // 时间戳过期自愈（同 Widget 链路）：刷新 timestamp 保留原 sign 重试一次，
+            // 仅当服务端不校验 sign 与 timestamp 绑定时生效，否则回退原失败上报。
+            if let http = response as? HTTPURLResponse,
+               http.statusCode == 401 || http.statusCode == 403,
+               let freshStr = NIOVehicleLib.refreshTimestampParam(in: url.absoluteString),
+               let freshURL = URL(string: freshStr) {
+                var retryReq = req
+                retryReq.url = freshURL
+                let (rData, rResponse) = try await urlSession.data(for: retryReq)
+                if let rHttp = rResponse as? HTTPURLResponse {
+                    data = rData
+                    response = rHttp
+                    text = String(data: rData, encoding: .utf8) ?? ""
+                }
+            }
+
             guard let http = response as? HTTPURLResponse else { return nil }
-            let text = String(data: data, encoding: .utf8) ?? ""
             if http.statusCode == 200, let rawJson = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
                 let norm = RVSRormalizer.normalize(rawJson)
                 let normData = try JSONSerialization.data(withJSONObject: norm)
@@ -585,7 +723,7 @@ final class NIOService: ObservableObject {
                 return decoded.data?.status
             } else {
                 updateLog(logEntry, statusCode: http.statusCode, preview: String(text.prefix(200)))
-                noteAuthFailure(http.statusCode)
+                noteAuthFailure(http.statusCode, body: text)
             }
         } catch {
             updateLog(logEntry, statusCode: nil, preview: error.localizedDescription)
@@ -784,7 +922,7 @@ final class NIOService: ObservableObject {
                             return
                         }
                     } else {
-                        noteAuthFailure(http.statusCode)
+                        noteAuthFailure(http.statusCode, body: String(data: data, encoding: .utf8))
                     }
                 }
             } catch {
@@ -811,7 +949,7 @@ final class NIOService: ObservableObject {
                                 return
                             }
                         } else {
-                            noteAuthFailure(http.statusCode)
+                            noteAuthFailure(http.statusCode, body: String(data: data, encoding: .utf8))
                         }
                     }
                 } catch {
@@ -874,7 +1012,7 @@ final class NIOService: ObservableObject {
                             }
                         }
                     } else {
-                        noteAuthFailure(http.statusCode)
+                        noteAuthFailure(http.statusCode, body: String(data: data, encoding: .utf8))
                     }
                 }
             } catch {
@@ -1199,6 +1337,9 @@ final class NIOService: ObservableObject {
     private var lastActivityFingerprint: String?
     /// 上一次写入桌面 Widget 快照的内容指纹（含里程/限充等 Widget 可见但灵动岛去重不敏感的字段）
     private var lastWidgetFingerprint: String?
+    /// 最近一次刷新结果标签（"已更新"/"无数据更新"），粘性保留：
+    /// Widget 与锁屏实时活动持续展示，直到下一轮拉取给出新结果
+    private var lastRefreshNotice: String?
 
     /// 依据满电 CLTC 续航推算电池包容量 (kWh)：75 度 <600 / 100 度 <850 / 150 度
     func estimateBatteryCapacityKwh(socStatus: NIOSocStatus?) -> Double {
@@ -1218,7 +1359,10 @@ final class NIOService: ObservableObject {
         UserDefaults.standard.string(forKey: "nio_home_title") ?? "兔可可·蔚来"
     }
 
-    func updateLiveActivity(force: Bool = false) {
+    /// notice 非空时更新粘性刷新结果标签（"已更新"/"无数据更新"），
+    /// 随 ContentState 一路下发到锁屏实时活动与桌面 Widget 展示
+    func updateLiveActivity(force: Bool = false, notice: String? = nil) {
+        if let notice { lastRefreshNotice = notice }
         guard let resp = vehicleData, let status = resp.data?.status else { return }
 
         let socStatus = status.socStatus
@@ -1323,7 +1467,8 @@ final class NIOService: ObservableObject {
             lvBattSoc: lvSoc,
             lvBattVolt: lvVolt,
             vehicleVersion: vehicleVersion,
-            preferActualRange: preferActual
+            preferActualRange: preferActual,
+            refreshNotice: lastRefreshNotice
         )
 
         // 桌面 Widget 同步：仅当快照可见内容变化（或 force 主题换装）时才落盘并触发时间线刷新。
@@ -1573,11 +1718,11 @@ private final class BGTaskCompletionGuard: @unchecked Sendable {
     }
 }
 
-// MARK: - 后台定位保活（自用方案）
+// MARK: - 后台定位保活 + 同行智能监测（自用方案）
 
 /// 持续低精度定位让进程在后台存活，前台轮询 Timer 因此在后台继续跑（车况准实时刷新）。
-/// 纯自用保活方案：数据本身不使用、不存储；若上架 App Store 需移除
-/// （指南 2.5.4 要求后台定位与用户可见的核心功能直接相关）。
+/// 定位数据同时供 NIOProximityMonitor 做「手机与车同行」判定：位置仅本地比对、不存储不上传。
+/// 纯自用方案：若上架 App Store 需移除（指南 2.5.4 要求后台定位与用户可见的核心功能直接相关）。
 @MainActor
 final class NIOLocationKeepAlive: NSObject, ObservableObject {
     static let shared = NIOLocationKeepAlive()
@@ -1598,10 +1743,11 @@ final class NIOLocationKeepAlive: NSObject, ObservableObject {
         super.init()
         manager.delegate = self
         authorizationStatus = manager.authorizationStatus
-        // 保活用：不追求精度，尽量少唤醒 GPS 硬件
-        manager.desiredAccuracy = kCLLocationAccuracyThreeKilometers
-        manager.distanceFilter = CLLocationDistanceMax
-        manager.activityType = .other
+        // 百米级精度 + 50m 距离阈值：既保住进程后台存活，又能支撑同行监测
+        // （手机与车辆位置接近判定 + 速度判定，见 NIOProximityMonitor）
+        manager.desiredAccuracy = kCLLocationAccuracyHundredMeters
+        manager.distanceFilter = 50
+        manager.activityType = .automotiveNavigation
         // 关键：不允许系统自动暂停定位服务，否则后台仍会被挂起
         manager.pausesLocationUpdatesAutomatically = false
         // 后台持续收回调 = 进程不被挂起（需 Info.plist UIBackgroundModes 含 location）
@@ -1645,8 +1791,204 @@ extension NIOLocationKeepAlive: CLLocationManagerDelegate {
         }
     }
 
-    /// 定位数据仅为保活信号：不使用、不记录
-    nonisolated func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {}
+    /// 定位数据用途：① 保活信号（后台进程存活）② 同行智能监测（位置/速度仅本地比对，不存储不上传）
+    nonisolated func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+        Task { @MainActor in
+            NIOProximityMonitor.shared.ingest(locations: locations)
+        }
+    }
 
     nonisolated func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {}
+}
+
+// MARK: - 手机与爱车同行智能监测
+
+/// 依据手机定位（由 NIOLocationKeepAlive 转发）与车辆最近上报位置做本地比对：
+/// 手机与车位置重合/接近 且 快速移动 → 疑似人在车内，进入"同行会话"，
+/// 以 30s 高频间隔拉取车况，判定 行驶中 / 等灯低速 / 到达目的地，并确认落锁状态。
+/// 判定主要依赖手机速度（人在车内 = 车速），不依赖车辆 speed 字段的具体单位。
+/// 状态变化经 NIOService.publishTransientNotice 弹横幅；位置仅本地计算，不存储不上传。
+@MainActor
+final class NIOProximityMonitor: ObservableObject {
+    static let shared = NIOProximityMonitor()
+
+    enum TripPhase: Equatable {
+        case idle                    // 未检测到同行
+        case driving                 // 行驶中
+        case atLight                 // 等灯 / 低速蠕行
+        case arrived(locked: Bool)   // 已到达目的地（附带落锁状态）
+    }
+
+    @Published private(set) var phase: TripPhase = .idle
+    /// 手机当前是否处于车辆附近（供调试与未来 UI 使用）
+    @Published private(set) var isNearCar = false
+
+    // MARK: 判定阈值
+
+    /// 手机与车"重合或接近"判定半径（覆盖双端 GPS 定位误差）
+    private let nearDistance: CLLocationDistance = 400
+    /// 已接近状态下判"离开"的半径（滞回防抖：进入 400m / 离开 1000m）
+    private let awayDistance: CLLocationDistance = 1000
+    /// 手机快速移动阈值 m/s（≈7.2 km/h，步行速度以下不触发同行判定）
+    private let movingSpeed: CLLocationSpeed = 2.0
+    /// 车辆位置样本最大可信时长：超时说明车位置过期，跳过接近判定避免误判
+    private let carPositionMaxAge: TimeInterval = 15 * 60
+    /// 同行会话内高频拉取间隔：比保活轮询密，仍留足接口风控安全边距
+    private let smartInterval: TimeInterval = 30
+    /// 到达后降频轮询间隔（仅跟踪落锁状态变化）
+    private let arrivedInterval: TimeInterval = 120
+    /// 连续驻车拉取次数达到该值才判"到达"（单次驻车可能是等灯采样巧合）
+    private let arrivalStreakNeeded = 2
+    /// 连续低速观察次数达到该值才从"行驶中"转入"等灯"（防止蠕行误报横幅）
+    private let atLightStreakNeeded = 2
+
+    private var lastPhoneLocation: CLLocation?
+    private var lastSmartFetch: Date = .distantPast
+    private var parkedStreak = 0
+    private var lowSpeedStreak = 0
+    private var sessionTimer: Timer?
+
+    private init() {}
+
+    // MARK: - 定位入口（NIOLocationKeepAlive 转发）
+
+    func ingest(locations: [CLLocation]) {
+        guard NIOService.shared.isConfigured else { return }
+        guard let loc = locations.last else { return }
+        lastPhoneLocation = loc
+        updateProximity(at: loc)
+        // 接近车辆且快速移动 → 疑似在车内，发起一次同行检测拉取
+        if isNearCar, loc.speed > movingSpeed {
+            smartFetchIfNeeded()
+        }
+    }
+
+    // MARK: - 接近判定
+
+    private func updateProximity(at loc: CLLocation) {
+        guard let pos = NIOService.shared.vehicleData?.data?.status?.positionStatus,
+              let lat = pos.latitude, let lng = pos.longitude, lat != 0 || lng != 0 else {
+            endSession()
+            isNearCar = false
+            return
+        }
+        // 车位置过期：不可信（车可能早已离开），结束会话等待下一次拉取刷新位置
+        if let ts = pos.sampleTime, ts > 0 {
+            let sec = ts > 1_000_000_000_000 ? TimeInterval(ts) / 1000.0 : TimeInterval(ts)
+            if Date().timeIntervalSince1970 - sec > carPositionMaxAge {
+                endSession()
+                isNearCar = false
+                return
+            }
+        }
+        let carLoc = CLLocation(latitude: lat, longitude: lng)
+        let dist = loc.distance(from: carLoc)
+        isNearCar = isNearCar ? dist < awayDistance : dist < nearDistance
+        if !isNearCar { endSession() }
+    }
+
+    // MARK: - 同行会话与拉取调度
+
+    private func smartFetchIfNeeded() {
+        // 到达后只跟踪落锁变化，降频到 120s；同行进行中 30s 高频
+        let gate = isArrived ? arrivedInterval : smartInterval
+        guard Date().timeIntervalSince(lastSmartFetch) >= gate else { return }
+        lastSmartFetch = Date()
+        beginSessionIfNeeded()
+        Task { [weak self] in
+            await NIOService.shared.fetchVehicle(force: false)
+            self?.classifyAfterFetch()
+        }
+    }
+
+    private var isArrived: Bool {
+        if case .arrived = phase { return true }
+        return false
+    }
+
+    /// 会话期间由 Timer 兜底驱动：手机静止时无定位回调（distanceFilter 未达），
+    /// 等灯/到达判定必须靠定时拉取推进，否则会卡在上一个状态
+    private func beginSessionIfNeeded() {
+        guard sessionTimer == nil else { return }
+        let timer = Timer(timeInterval: 15, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                guard self.isNearCar else {
+                    self.endSession()
+                    return
+                }
+                self.smartFetchIfNeeded()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        sessionTimer = timer
+    }
+
+    private func endSession() {
+        sessionTimer?.invalidate()
+        sessionTimer = nil
+        parkedStreak = 0
+        lowSpeedStreak = 0
+        if phase != .idle { phase = .idle }
+    }
+
+    // MARK: - 行驶状态判定（拉取后）
+
+    private func classifyAfterFetch() {
+        guard isNearCar, let status = NIOService.shared.vehicleData?.data?.status else { return }
+        let phoneSpeed = lastPhoneLocation?.speed ?? 0
+        let vehicleState = status.exteriorStatus?.vehicleState ?? 0
+
+        switch vehicleState {
+        case 1:
+            // 行驶挡位：车机在 D 档。手机快速移动 = 行驶中；手机低速/静止 = 等灯或蠕行
+            parkedStreak = 0
+            if phoneSpeed > movingSpeed {
+                lowSpeedStreak = 0
+                transition(to: .driving)
+            } else {
+                lowSpeedStreak += 1
+                if lowSpeedStreak >= atLightStreakNeeded {
+                    transition(to: .atLight)
+                }
+            }
+        case 2, 3, 4:
+            // 驻车 / 充电 / 换电：连续两轮即判到达，附落锁状态
+            lowSpeedStreak = 0
+            parkedStreak += 1
+            if parkedStreak >= arrivalStreakNeeded {
+                let doors = status.doorStatus ?? [:]
+                let locked = (doors["vehicle_lock_status"]?.intValue
+                    ?? doors["lock_status"]?.intValue
+                    ?? doors["lock"]?.intValue ?? 1) == 1
+                transition(to: .arrived(locked: locked))
+            }
+        default:
+            // 0 = 未知：保持当前状态，等待下一轮
+            break
+        }
+    }
+
+    /// 状态变迁：仅变化时弹横幅；回到 idle（人车分离）静默结束
+    private func transition(to newPhase: TripPhase) {
+        guard newPhase != phase else { return }
+        phase = newPhase
+        switch newPhase {
+        case .driving:
+            NIOService.shared.publishTransientNotice(.info, "🚗 检测到与爱车同行 · 行驶中，车况高频同步")
+        case .atLight:
+            NIOService.shared.publishTransientNotice(.info, "🚥 等灯 / 低速中 · 到达后将确认落锁")
+        case .arrived(let locked):
+            parkedStreak = 0
+            if locked {
+                UINotificationFeedbackGenerator().notificationOccurred(.success)
+                NIOService.shared.publishTransientNotice(.success, "🏁 已到达目的地 · 车辆已上锁 ✓")
+            } else {
+                UINotificationFeedbackGenerator().notificationOccurred(.warning)
+                NIOService.shared.publishTransientNotice(.warn, "🏁 已到达目的地 · 车辆未上锁 🔓 请留意")
+            }
+        case .idle:
+            break
+        }
+    }
 }

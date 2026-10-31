@@ -39,6 +39,7 @@ struct WheaterVehicleSnapshot: Codable {
     var tyrePressRL: Double?
     var tyrePressRR: Double?
     var themeRaw: String?
+    var refreshNotice: String?
     var updatedAt: Date
 
     static let appGroupID = "group.com.YumikoToysRR.wheater"
@@ -78,6 +79,7 @@ struct WheaterVehicleSnapshot: Codable {
             tyrePressRL: state.tyrePressRL,
             tyrePressRR: state.tyrePressRR,
             themeRaw: state.themeRaw,
+            refreshNotice: state.refreshNotice,
             updatedAt: state.updateTimestamp
         )
         guard let defaults = UserDefaults(suiteName: appGroupID),
@@ -107,7 +109,7 @@ struct WheaterVehicleSnapshot: Codable {
             lvBattSoc: 96, lvBattVolt: 12.8, vehicleVersion: nil,
             preferActualRange: false,
             tyrePressFL: 2.5, tyrePressFR: 2.5, tyrePressRL: 2.4, tyrePressRR: 2.4,
-            themeRaw: "kawaiiLight", updatedAt: Date()
+            themeRaw: "kawaiiLight", refreshNotice: "已更新", updatedAt: Date()
         )
     }
 }

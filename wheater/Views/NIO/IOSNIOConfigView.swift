@@ -1324,10 +1324,10 @@ struct IOSNIOConfigView: View {
                 // 后台定位保活（自用）：进程不被挂起 → 轮询 Timer 后台照常跑
                 Toggle(isOn: $keepAliveEnabled) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("📍 后台定位保活")
+                        Text("📍 后台定位保活与同行监测")
                             .font(.system(size: 12, weight: .bold))
                             .foregroundStyle(NIOThemePaint.text)
-                        Text("持续低精度定位让进程在后台存活，车况后台准实时刷新；不使用、不存储位置信息")
+                        Text("低精度定位保持后台刷新；手机接近爱车且快速移动时高频同步车况，识别行驶/等灯/到达与落锁。位置仅本地比对，不存储不上传")
                             .font(.system(size: 9))
                             .foregroundStyle(NIOThemePaint.text.opacity(0.55))
                     }

@@ -606,3 +606,174 @@ struct NIOTodayTrackCard: View {
         )
     }
 }
+
+// MARK: - 服务与换电订单概览卡（累计订单 / 换电次数 / 累计与平均花费）
+
+struct NIOSwapOverviewCard: View {
+    let summary: NIOServiceSummary?
+
+    var body: some View {
+        NIODashCardShell(title: "服务与换电订单概览", subtitle: "订单同步数据解析") {
+            if let s = summary, s.total > 0 {
+                VStack(spacing: 0) {
+                    overviewRow(label: "累计服务订单", value: "\(s.total) 单", tint: .blue)
+                    Divider()
+                    overviewRow(label: "换电完成次数", value: "\(s.swapCompleted) 次", tint: .green)
+                    Divider()
+                    overviewRow(label: "换电累计花费", value: NIOOrderLib.fmtMoney(s.swapSpent), tint: .primary)
+                    Divider()
+                    overviewRow(label: "平均换电花费", value: NIOOrderLib.fmtMoney(s.swapAvgSpent), tint: .primary)
+                }
+            } else {
+                orderCardEmptyHint("暂无订单数据 · 拉取服务订单后自动解析")
+            }
+        }
+    }
+
+    private func overviewRow(label: String, value: String, tint: Color) -> some View {
+        HStack {
+            Text(label)
+                .font(.subheadline)
+            Spacer()
+            Text(value)
+                .font(.subheadline.weight(.semibold).monospacedDigit())
+                .foregroundStyle(tint)
+        }
+        .padding(.vertical, 9)
+    }
+}
+
+// MARK: - 常用换电站 Top 5 卡（按完成换电次数排行）
+
+struct NIOTopStationsCard: View {
+    let stations: [NIOStationStat]
+
+    var body: some View {
+        NIODashCardShell(title: "常用换电站 Top 5", subtitle: "按完成换电次数排行") {
+            if stations.isEmpty {
+                orderCardEmptyHint("暂无换电站足迹 · 完成换电后自动统计")
+            } else {
+                let top = Array(stations.prefix(5))
+                let maxCount = max(top.first?.count ?? 1, 1)
+                VStack(spacing: 12) {
+                    ForEach(Array(top.enumerated()), id: \.element.id) { idx, station in
+                        VStack(alignment: .leading, spacing: 5) {
+                            HStack(spacing: 8) {
+                                Text("\(idx + 1)")
+                                    .font(.caption.weight(.heavy).monospacedDigit())
+                                    .foregroundStyle(idx == 0 ? .blue : .secondary)
+                                    .frame(width: 16)
+                                Text(station.name)
+                                    .font(.subheadline.weight(.medium))
+                                    .lineLimit(1)
+                                Spacer(minLength: 0)
+                                Text("\(station.count) 次 · \(NIOOrderLib.fmtMoney(station.spent))")
+                                    .font(.caption.weight(.semibold).monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                            }
+                            ProgressView(value: Double(station.count), total: Double(maxCount))
+                                .tint(idx == 0 ? .blue : .secondary.opacity(0.5))
+                                .scaleEffect(x: 1, y: 0.7, anchor: .center)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// MARK: - 订单明细列表卡（点击展开订单解析明细）
+
+struct NIOOrderListCard: View {
+    let orders: [NIOServiceOrder]
+
+    @State private var expandedOrderID: String?
+
+    var body: some View {
+        NIODashCardShell(title: "订单明细列表", subtitle: "共 \(orders.count) 单 · 点击展开明细") {
+            if orders.isEmpty {
+                orderCardEmptyHint("暂无订单")
+            } else {
+                VStack(spacing: 0) {
+                    ForEach(orders) { order in
+                        orderRow(order)
+                        if order.id != orders.last?.id { Divider() }
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func orderRow(_ order: NIOServiceOrder) -> some View {
+        let isExpanded = expandedOrderID == order.id
+        Button {
+            withAnimation(.snappy(duration: 0.25)) {
+                expandedOrderID = isExpanded ? nil : order.id
+            }
+        } label: {
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(spacing: 10) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(NIOOrderLib.orderTypeLabel(order))
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.primary)
+                        Text(NIOOrderLib.fmtSwapDate(order.createTime))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 0)
+                    Text(order.orderStatusName ?? "")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(orderToneColor(NIOOrderLib.orderStatusTone(order)))
+                        .lineLimit(1)
+                    Image(systemName: "chevron.down")
+                        .font(.caption2.weight(.bold))
+                        .foregroundStyle(.secondary)
+                        .rotationEffect(.degrees(isExpanded ? 180 : 0))
+                }
+                .padding(.vertical, 10)
+                .contentShape(Rectangle())
+
+                if isExpanded {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(Array(NIOOrderLib.orderDetailLines(order).enumerated()), id: \.offset) { _, line in
+                            HStack(alignment: .top) {
+                                Text(line.label)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .frame(width: 80, alignment: .leading)
+                                Text(line.value)
+                                    .font(.caption.weight(.medium).monospacedDigit())
+                                    .foregroundStyle(.primary)
+                                    .textSelection(.enabled)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                        }
+                    }
+                    .padding(.bottom, 10)
+                }
+            }
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+/// 订单状态色调 → 颜色
+private func orderToneColor(_ tone: String) -> Color {
+    switch tone {
+    case "success": return .green
+    case "danger": return .red
+    case "warning": return .orange
+    default: return .secondary
+    }
+}
+
+/// 订单类卡片空态提示
+private func orderCardEmptyHint(_ text: String) -> some View {
+    Text(text)
+        .font(.caption)
+        .foregroundStyle(.secondary)
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 8)
+}

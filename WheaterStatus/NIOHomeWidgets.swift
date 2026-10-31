@@ -200,26 +200,32 @@ struct NIOVehicleSmallView: View {
             .frame(height: 6)
             .padding(.top, 5)
 
-            // 底部行：12V 或 充电ETA + 更新时间
-            HStack {
-                if snap.isCharging, let eta = snap.chargeEtaDate {
-                    let min = Int(eta.timeIntervalSinceNow / 60)
-                    if min > 0 {
-                        Text(min >= 60 ? "\(min/60)时\(min%60)分" : "\(min)分")
-                            .font(.system(size: 9, weight: .semibold))
-                            .foregroundStyle(theme.warm)
-                    }
-                } else if let lv = snap.lvBattSoc, lv > 0, lv < 30 {
-                    Text("12V \(lv)%")
-                        .font(.system(size: 9, weight: .bold, design: .monospaced))
-                        .foregroundStyle(.orange)
+        // 底部行：12V 或 充电ETA + 刷新结果标签 + 更新时间
+        HStack(spacing: 4) {
+            if snap.isCharging, let eta = snap.chargeEtaDate {
+                let min = Int(eta.timeIntervalSinceNow / 60)
+                if min > 0 {
+                    Text(min >= 60 ? "\(min/60)时\(min%60)分" : "\(min)分")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(theme.warm)
                 }
-                Spacer()
-                Text(updatedText)
-                    .font(.system(size: 9))
-                    .foregroundStyle(theme.textSoft.opacity(0.8))
+            } else if let lv = snap.lvBattSoc, lv > 0, lv < 30 {
+                Text("12V \(lv)%")
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    .foregroundStyle(.orange)
             }
-            .padding(.top, 3)
+            Spacer()
+            if let notice = snap.refreshNotice, !notice.isEmpty {
+                Text(notice)
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(notice == "已更新" ? Color.green : theme.textSoft.opacity(0.8))
+                    .lineLimit(1)
+            }
+            Text(updatedText)
+                .font(.system(size: 9))
+                .foregroundStyle(theme.textSoft.opacity(0.8))
+        }
+        .padding(.top, 3)
         }
         .containerBackground(for: .widget) {
             LinearGradient(colors: [theme.background, theme.backgroundSoft],
@@ -456,10 +462,17 @@ struct NIOVehicleMediumView: View {
             }
         }
 
-        // 底部行：车机版本 + 更新时间（横跨全宽，左缘与电量条左缘对齐）
+        // 底部行：车机版本 + 刷新结果标签 + 更新时间（横跨全宽，左缘与电量条左缘对齐）
         HStack(spacing: 5) {
             if let ver = snap.vehicleVersion, !ver.isEmpty {
                 widgetMetaPill(icon: "cpu", text: ver, theme: theme)
+            }
+            if let notice = snap.refreshNotice, !notice.isEmpty {
+                widgetMetaPill(
+                    icon: notice == "已更新" ? "checkmark.circle" : "tray.full",
+                    text: notice,
+                    theme: theme
+                )
             }
             Spacer()
             widgetMetaPill(icon: "clock", text: updatedText, theme: theme)

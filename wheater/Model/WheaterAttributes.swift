@@ -61,6 +61,7 @@ struct WheaterAttributes: ActivityAttributes {
         var lvBattVolt: Double?          // 12V 小电瓶电压 V
         var vehicleVersion: String?      // 车机固件短版本号 (FOTA，e.g. "5.1.5"，取不到则 nil)
         var preferActualRange: Bool?     // 用户是否偏好实估续航展示模式
+        var refreshNotice: String?       // 最近一次刷新结果标签（"已更新"/"无数据更新"），Widget 与锁屏实时活动展示
 
         // 辅助格式化
         var socDisplay: String {
@@ -124,7 +125,10 @@ struct WheaterAttributes: ActivityAttributes {
                 (v2lActive ?? false) ? "V" : "-",
                 lvBattSoc.map { "\($0)" } ?? "-",
                 vehicleVersion ?? "-",
-                chargeEtaDate.map { "\(Int($0.timeIntervalSince1970 / 300))" } ?? "-"
+                chargeEtaDate.map { "\(Int($0.timeIntervalSince1970 / 300))" } ?? "-",
+                // 刷新结果标签纳入指纹：标签翻转（已更新↔无数据更新）即触发一次推送，
+                // 保证 Widget / 锁屏实时活动的标签始终反映最近一轮拉取结果
+                refreshNotice ?? "-"
             ].joined(separator: "|")
         }
     }

@@ -23,6 +23,9 @@ final class NIOCredentialReceiver: ObservableObject {
     /// 上次成功应用的完整凭证指纹（token+vehicleId+deviceId），用于去重：
     /// 相同凭证重复推送时静默忽略，不再震动/覆盖剪贴板/弹提示
     private var lastAppliedFingerprint: String = ""
+    /// 上次「Token 失效状态下重推相同凭证」触发强制重验的时间（60 秒冷却，
+    /// 防止 Shadowrocket 脚本随 NIO App 每次请求重推相同凭证时连环触发刷新）
+    private var lastInvalidRepushRefreshAt: Date = .distantPast
 
     private let port: UInt16 = 8997
     private var listener: NWListener?
@@ -244,10 +247,23 @@ final class NIOCredentialReceiver: ObservableObject {
 
         // 去重：核心三要素（token+vehicleId+deviceId）与上次完全相同 → 静默忽略。
         // 重复推送不再震动、不覆盖剪贴板、不弹横幅，只轻量记录时间。
+        // 例外：当前 Token 已被判定失效（401/403）时不能静默——重推相同凭证说明
+        // 用户在尝试恢复，需明确警示"凭证未变化但已失效"，并强制重验一次；
+        // 服务端仍返回 403 则保持红色警示，已恢复则横幅自动复位。
         let fingerprint = "\(token)|\(vehicleId)|\(effectiveDeviceId)"
         if fingerprint == lastAppliedFingerprint {
             lastReceivedAt = Date()
-            statusMessage = "🔁 重复推送已忽略（凭证未变化）"
+            if service.is403Detected {
+                statusMessage = "🚨 凭证未变化但 Token 已失效（403）· 打开蔚来 App 爱车页下拉刷新即可"
+                UINotificationFeedbackGenerator().notificationOccurred(.warning)
+                // 冷却 60 秒：脚本会随 NIO App 每次请求重推相同凭证，避免连环触发刷新撞接口
+                if Date().timeIntervalSince(lastInvalidRepushRefreshAt) >= 60 {
+                    lastInvalidRepushRefreshAt = Date()
+                    service.refreshAll(force: true)
+                }
+            } else {
+                statusMessage = "🔁 重复推送已忽略（凭证未变化）"
+            }
             return
         }
 

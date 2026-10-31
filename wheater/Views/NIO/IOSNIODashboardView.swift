@@ -352,13 +352,24 @@ struct IOSNIODashboardView: View {
                         }
                     }
                 }
+                // 刷新结果 / 同行事件横幅：顶部悬浮，自动消失
+                .overlay(alignment: .top) {
+                    if let notice = service.transientNotice {
+                        NIOTransientNoticeBanner(notice: notice) {
+                            service.transientNotice = nil
+                        }
+                        .padding(.top, 6)
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                    }
+                }
+                .animation(.spring(response: 0.4, dampingFraction: 0.85), value: service.transientNotice)
             }
             .navigationBarTitleDisplayMode(.inline)
             .toolbar(removing: .sidebarToggle) // 移除系统玻璃折叠按钮，改用自定义标题头
             .toolbarBackground(.hidden, for: .navigationBar)
             .toolbar {
                 ToolbarItemGroup(placement: .topBarTrailing) {
-                    Button { service.refreshAll(force: true) } label: {
+                    Button { service.refreshAll(force: true, announce: true) } label: {
                         Image(systemName: "arrow.clockwise")
                     }
                     .disabled(service.isLoadingVehicle)
@@ -429,7 +440,7 @@ struct IOSNIODashboardView: View {
                     Text("蔚来 Token 已失效")
                         .font(.system(size: 14, weight: .heavy, design: .rounded))
                         .foregroundStyle(NIOThemePaint.text)
-                    Text("车况已停止刷新（15 分钟降频重试中）· 点击重新配置")
+                    Text("打开蔚来 App 爱车页下拉刷新即可自动更新 · 无需重新登录")
                         .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(NIOThemePaint.textSoft)
                         .lineLimit(1)
@@ -801,6 +812,10 @@ struct IOSNIODashboardView: View {
                 }
             }
 
+            NIOSwapOverviewCard(summary: service.serviceSummary)
+            NIOTopStationsCard(stations: service.serviceSummary?.topSwapStations ?? [])
+            NIOOrderListCard(orders: service.serviceSummary?.orders ?? service.recentOrders)
+
             NIOMaintenanceCard(mileageKm: status?.exteriorStatus?.mileage, orders: service.recentOrders)
         }
     }
@@ -902,7 +917,7 @@ struct IOSNIODashboardView: View {
     }
 
     private func refresh() async {
-        await service.fetchVehicle(force: true)
+        await service.fetchVehicle(force: true, announce: true)
         await service.fetchChange(force: true)
         await service.fetchCheckin(force: true)
         service.updateLiveActivity()
@@ -976,6 +991,48 @@ private struct NIOAppBackground: View {
                 startRadius: 20,
                 endRadius: 520
             )
+        }
+    }
+}
+
+/// 刷新结果 / 同行事件横幅：顶部悬浮胶囊，2.8 秒后自动消失（新横幅会重置计时）
+private struct NIOTransientNoticeBanner: View {
+    let notice: NIOTransientNotice
+    let onDismiss: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: notice.kind.icon)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(tint)
+            Text(notice.message)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(NIOThemePaint.text)
+                .lineLimit(1)
+                .minimumScaleFactor(0.85)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(
+            Capsule(style: .continuous)
+                .fill(NIOThemePaint.fill)
+                .shadow(color: .black.opacity(0.18), radius: 10, y: 3)
+        )
+        .overlay(Capsule(style: .continuous).stroke(tint.opacity(0.35), lineWidth: 1))
+        .padding(.horizontal, 20)
+        .task(id: notice.id) {
+            try? await Task.sleep(nanoseconds: 2_800_000_000)
+            onDismiss()
+        }
+    }
+
+    private var tint: Color {
+        switch notice.kind {
+        case .success: return .green
+        case .neutral: return .secondary
+        case .warn: return .orange
+        case .info: return NIOThemePaint.accent
         }
     }
 }

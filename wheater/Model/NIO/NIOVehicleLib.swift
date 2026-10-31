@@ -392,6 +392,87 @@ enum NIOVehicleLib {
         return "\(base)?\(newQuery)"
     }
 
+    /// 仅刷新 URL 中的 timestamp 参数为当前时间，其余参数与既有 sign 逐字节保留。
+    /// 用于「服务端只校验时间戳新鲜度、不校验 sign 与 timestamp 绑定」的接口自愈重试
+    /// （ha-nio 实证蔚来部分网关不验签）：若服务端同时校验绑定，该 URL 仍会被拒绝，
+    /// 调用方回退为原样重放，无额外副作用。无 timestamp 参数时返回 nil。
+    static func refreshTimestampParam(in urlString: String) -> String? {
+        guard urlString.contains("timestamp=") else { return nil }
+        // timestamp 位数沿用原值（10 位秒级 / 13 位毫秒级），防止格式不一致
+        let isMillisecond = urlString.range(of: "timestamp=1[3-9]\\d{11}") != nil
+        let now = isMillisecond ? String(Int(Date().timeIntervalSince1970 * 1000))
+                                : String(Int(Date().timeIntervalSince1970))
+        let replaced = urlString.replacingOccurrences(
+            of: "timestamp=\\d+",
+            with: "timestamp=\(now)",
+            options: .regularExpression
+        )
+        return replaced == urlString ? nil : replaced
+    }
+
+    /// 车况"显著内容"指纹：两次拉取结果一致 ⟺ 指纹一致。
+    /// 用于「数据无变化时不刷新主界面更新时间」与刷新横幅的 已更新/无更新 判定。
+    /// 刻意排除 sample_time 等采样时间戳（车辆持续遥测采样，值恒变，会误判为更新），
+    /// 位置取 3 位小数（≈110 m，吸收驻车 GPS 抖动），速度取整数（行驶中每轮都在变，属真实数据更新）。
+    static func statusFingerprint(_ status: NIOVehicleStatus?) -> String {
+        guard let s = status else { return "" }
+        var parts: [String] = []
+
+        let soc = s.socStatus
+        parts.append(String(format: "%.1f/%.0f/%.0f/c%@/p%.1f/v%d/t%.0f",
+                            soc?.soc ?? -1,
+                            soc?.remainingRange ?? -1,
+                            soc?.remainingActualRange ?? -1,
+                            soc?.chargeState.map(String.init) ?? "-",
+                            soc?.chargingPower ?? -1,
+                            soc?.v2lStatus ?? -1,
+                            soc?.targetSocPercentage ?? -1))
+
+        let doors = s.doorStatus ?? [:]
+        // 整车车锁（与看板同源：缺字段按未上锁 -1 记，避免默认 1 掩盖真实变化）
+        parts.append("\(doors["vehicle_lock_status"]?.intValue ?? doors["lock_status"]?.intValue ?? doors["lock"]?.intValue ?? -1)")
+        for key in ["door_ajar_front_left_status", "door_ajar_front_right_status",
+                    "door_ajar_rear_left_status", "door_ajar_rear_right_status"] {
+            parts.append("\(doors[key]?.intValue ?? -1)")
+        }
+
+        let win = s.windowStatus ?? [:]
+        for key in ["win_posn_fl", "win_posn_fr", "win_posn_rl", "win_posn_rr", "sun_roof_posn",
+                    "win_front_left_posn", "win_front_right_posn", "win_rear_left_posn", "win_rear_right_posn"] {
+            parts.append("\(win[key]?.intValue ?? -1)")
+        }
+
+        let ext = s.exteriorStatus
+        parts.append("\(ext?.vehicleState ?? -1)/\(String(format: "%.0f", ext?.mileage ?? -1))/\(String(format: "%.0f", ext?.speed ?? -1))")
+
+        let pos = s.positionStatus
+        parts.append(String(format: "%.3f/%.3f", pos?.latitude ?? -1, pos?.longitude ?? -1))
+
+        parts.append(String(format: "%.1f/%.1f", s.hvacStatus?.temperature ?? -99, s.hvacStatus?.outsideTemperature ?? -99))
+
+        let tyre = extractTyreInfo(from: s)
+        parts.append(String(format: "%.1f/%.1f/%.1f/%.1f", tyre.fl.press ?? -1, tyre.fr.press ?? -1, tyre.rl.press ?? -1, tyre.rr.press ?? -1))
+
+        parts.append(s.fotaStatus?.currentVersion ?? "-")
+
+        let off = s.offcarModeStatus ?? [:]
+        let offSig = [
+            modeActive(off["defender_mode_status"] ?? off["defender_mode"]),
+            modeActive(off["pet_mode_status"] ?? off["pet_mode"]),
+            modeActive(off["camping_mode_status"] ?? off["camping_mode"] ?? off["camp_mode_status"]),
+            modeActive(off["power_hold_mode_status"] ?? off["power_hold_mode"] ?? off["offcar_power_hold"])
+        ].map { $0 ? "1" : "0" }.joined()
+        parts.append(offSig)
+
+        let lv = s.lvBattStatus ?? [:]
+        parts.append(String(format: "%d/%.1f", lv["lv_batt_soc"]?.intValue ?? -1, lv["lv_batt_volt"]?.doubleValue ?? -1))
+
+        let frdg = s.frdgStatus ?? [:]
+        parts.append(String(format: "%d/%.1f", frdg["frdg_pwr_sts"]?.intValue ?? -1, (frdg["frdg_cur_t"]?.doubleValue ?? frdg["frdg_tar_t"]?.doubleValue ?? -99)))
+
+        return parts.joined(separator: "|")
+    }
+
     // MARK: - 路径测距与按天轨迹计算
 
     static func segmentMeters(lat1: Double, lng1: Double, lat2: Double, lng2: Double) -> Double {
