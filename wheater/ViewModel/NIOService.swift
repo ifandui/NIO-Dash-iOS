@@ -156,6 +156,8 @@ final class NIOService: ObservableObject {
     }
     private static let lastVehicleFetchKey = "nio_last_vehicle_fetch_time"
     @Published var is403Detected = false
+    /// 最近一次智能识别的解析备注（识别到什么/过滤了什么），设置页智能识别卡展示
+    @Published var lastParseNotes: [String] = []
 
     /// 刷新结果横幅（主界面顶部自动消失）：
     /// 进后台/回前台触发的刷新与手动刷新会 announce，后台定时轮询静默不打扰
@@ -1119,6 +1121,8 @@ final class NIOService: ObservableObject {
         }
 
         let parsed = NIOVehicleLib.smartParseInput(trimmed)
+        // 解析过程备注（过滤了什么 / 识别到什么），供设置页智能识别卡展示
+        lastParseNotes = parsed.notes
         var updated = false
 
         if let mode = parsed.mode, !mode.isEmpty {

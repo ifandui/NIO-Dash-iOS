@@ -1030,6 +1030,26 @@ struct IOSNIOConfigView: View {
                         .clipShape(RoundedRectangle(cornerRadius: 10))
                 }
 
+                // 解析过程备注：识别到什么 / 过滤了什么（样本剔除等），可审计
+                if !service.lastParseNotes.isEmpty {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(service.lastParseNotes, id: \.self) { note in
+                            HStack(alignment: .top, spacing: 5) {
+                                Image(systemName: "text.badge.checkmark")
+                                    .font(.system(size: 9))
+                                    .foregroundStyle(mintCyan)
+                                Text(note)
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(NIOThemePaint.text.opacity(0.75))
+                            }
+                        }
+                    }
+                    .padding(8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(mintCyan.opacity(0.08))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                }
+
                 HStack(spacing: 10) {
                     Button(action: {
                         let impact = UIImpactFeedbackGenerator(style: .medium)
