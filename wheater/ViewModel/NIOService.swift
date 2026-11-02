@@ -1674,9 +1674,9 @@ final class NIOService: ObservableObject {
         let vehicleVersion = fotaInfo.shortVer.isEmpty ? nil : fotaInfo.fullDisplay
 
         // 充电目标（上限）：target_soc_percentage 为用户设定的限充值（与看板"目标电量"同源）。
-        // 注意：max_soc 不是限充字段（服务端常驻默认 90，导致上限永远显示 90%），不参与兜底；
-        // 仅 target_soc_percentage → lock_soc → 100 递退。
-        let rawTarget = socStatus?.targetSocPercentage ?? socStatus?.lockSoc ?? 0
+        // 注意：max_soc 与 lock_soc 都是服务端常驻默认 90 的非限充字段（实测恒显 90%），
+        // 一律不参与兜底；无用户设定值时按 100 展示。
+        let rawTarget = socStatus?.targetSocPercentage ?? 0
         let targetSoc = (rawTarget > 1 && rawTarget <= 100) ? rawTarget : 100.0
         let capacityKwh = estimateBatteryCapacityKwh(socStatus: socStatus)
         var etaDate: Date? = nil

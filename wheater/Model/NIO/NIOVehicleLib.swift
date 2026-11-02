@@ -427,7 +427,7 @@ enum NIOVehicleLib {
         CommandEntry(function: "rvs_set_rearview_mirror", title: "后视镜", icon: "rectangle.landscape.rotate", sensitive: true),
         CommandEntry(function: "rvs_set_sunblind", title: "遮阳帘", icon: "blinds.horizontal.closed", sensitive: false),
         CommandEntry(function: "rvs_set_glove_box", title: "手套箱", icon: "shippingbox.fill", sensitive: true),
-        CommandEntry(function: "rvs_seats_heating", title: "座椅加热", icon: "heat.element.shape", sensitive: false),
+        CommandEntry(function: "rvs_seats_heating", title: "座椅加热", icon: "flame.fill", sensitive: false),
         CommandEntry(function: "rvs_set_btry_warm", title: "电池预热", icon: "battery.100.bolt", sensitive: false),
         CommandEntry(function: "rvs_set_poweroutlet", title: "对外放电", icon: "powerplug.fill", sensitive: true),
         CommandEntry(function: "rvs_set_engine_hood", title: "前舱盖", icon: "car.front.waves.up.fill", sensitive: true),
