@@ -22,6 +22,7 @@ struct IOSNIOConfigView: View {
     @State private var testStatusText: String?
     @State private var isTesting = false
     @State private var showLogsSheet = false
+    @State private var showInboxSheet = false
     @State private var showAboutSheet = false
     @State private var showReleaseNotesSheet = false
     @State private var showLaunchPreview = false
@@ -52,6 +53,18 @@ struct IOSNIOConfigView: View {
                 // 背景渐变
                 animeBackground
                     .ignoresSafeArea()
+
+                // 应用内横幅：在设置页停留时也能看到推送回填 / 刷新结果
+                .overlay(alignment: .top) {
+                    if let notice = service.transientNotice {
+                        NIOTransientNoticeBanner(notice: notice) {
+                            service.transientNotice = nil
+                        }
+                        .padding(.top, 4)
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                    }
+                }
+                .animation(.spring(response: 0.4, dampingFraction: 0.85), value: service.transientNotice)
 
                 GeometryReader { geo in
                     // Duo 展开态 / iPad 宽屏：设置双列（视觉设置左，连接与 API 右）；窄屏单列
@@ -165,6 +178,9 @@ struct IOSNIOConfigView: View {
             }
             .adaptivePresentation(isPresented: $showLogsSheet) {
                 IOSNIOFetchLogView()
+            }
+            .adaptivePresentation(isPresented: $showInboxSheet) {
+                NIOCredentialInboxView()
             }
             .adaptivePresentation(isPresented: $showAboutSheet) {
                 IOSAboutView()
@@ -780,6 +796,19 @@ struct IOSNIOConfigView: View {
                             .clipShape(RoundedRectangle(cornerRadius: 8))
                             .overlay(RoundedRectangle(cornerRadius: 8).stroke(NIOThemePaint.stroke, lineWidth: 0.5))
                     }
+
+                    // 凭证收件箱：查看 / 复制最近推送的每个字段与抓包样本
+                    Button(action: { showInboxSheet = true }) {
+                        Label("3. 凭证收件箱", systemImage: "tray.full.fill")
+                            .font(.system(size: 10, weight: .bold))
+                            .padding(.vertical, 8)
+                            .padding(.horizontal, 8)
+                            .frame(maxWidth: .infinity)
+                            .background(mintCyan.opacity(0.15))
+                            .foregroundStyle(mintCyan)
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                            .overlay(RoundedRectangle(cornerRadius: 8).stroke(mintCyan.opacity(0.4), lineWidth: 0.5))
+                    }
                 }
 
                 // 操作步骤
@@ -788,7 +817,7 @@ struct IOSNIOConfigView: View {
                     stepRow("2", "点击「复制模块链接」→ 打开 Shadowrocket → 配置 → 模块 → 新建，粘贴链接导入")
                     stepRow("3", "确认 Shadowrocket 已开启 MITM（需安装证书）")
                     stepRow("4", "打开蔚来 App 下拉刷新爱车页面一次")
-                    stepRow("✅", "本 App 自动震动 + 系统通知 = 回填完成！")
+                    stepRow("✅", "推送自动回填！字段与抓包样本可在「凭证收件箱」查看复制")
                 }
                 .font(.system(size: 9))
                 .foregroundStyle(NIOThemePaint.text.opacity(0.65))
@@ -1120,6 +1149,18 @@ struct IOSNIOConfigView: View {
                         .foregroundStyle(NIOThemePaint.text)
                         .autocorrectionDisabled()
                         .textInputAutocapitalization(.never)
+
+                    // Token 生命周期倒计时（蔚来 access_token 有效期 30 天，无自动续期；签名密钥永久有效）
+                    if let days = service.nioTokenDaysRemaining, let expiry = service.nioTokenExpiryDate {
+                        HStack(spacing: 4) {
+                            Image(systemName: days <= 3 ? "exclamationmark.triangle.fill" : "clock.badge.checkmark")
+                                .font(.system(size: 9))
+                            Text("Token 剩余约 \(days) 天 · 预计 \(Self.tokenExpiryFormatter.string(from: expiry)) 到期 · 签名密钥永久有效，高频使用可能滑动续期")
+                                .font(.system(size: 9))
+                            Spacer()
+                        }
+                        .foregroundStyle(days <= 3 ? Color.red : (days <= 7 ? Color.orange : Color.green.opacity(0.85)))
+                    }
                 }
 
                 // 2. Vehicle ID (必填/自动填充)
@@ -1189,7 +1230,7 @@ struct IOSNIOConfigView: View {
                         .font(.system(size: 10, weight: .bold))
                         .foregroundStyle(NIOThemePaint.text.opacity(0.7))
 
-                    SecureField("动态签名密钥 (留空将使用安全默认算法)", text: $service.nioVehicleSignSecret)
+                    SecureField("动态签名密钥 (内置 Android 逆向密钥，通常无需修改)", text: $service.nioVehicleSignSecret)
                         .font(.system(size: 11, design: .monospaced))
                         .padding(8)
                         .background(NIOThemePaint.well)
@@ -1198,6 +1239,37 @@ struct IOSNIOConfigView: View {
                         .foregroundStyle(NIOThemePaint.text)
                         .autocorrectionDisabled()
                         .textInputAutocapitalization(.never)
+
+                    // 签名算法选择：自定义触发按钮 + Menu 弹层（系统 menu Picker 在 iOS 上会撑满宽度且
+                    // label 使用大字号，与配置页 9-11pt 自定义风格错位）
+                    HStack(spacing: 8) {
+                        Text("签名算法")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundStyle(NIOThemePaint.text.opacity(0.7))
+                        Spacer()
+                        Menu {
+                            Picker(selection: $service.nioVehicleSignAlgo) {
+                                ForEach(Self.supportedSignAlgos, id: \.self) { algo in
+                                    Text(algoDisplayName(algo)).tag(algo)
+                                }
+                            } label: { EmptyView() }
+                        } label: {
+                            HStack(spacing: 5) {
+                                Text(service.nioVehicleSignAlgo)
+                                    .font(.system(size: 10, design: .monospaced))
+                                    .foregroundStyle(service.nioVehicleSignAlgo == "md5_full"
+                                                     ? Color.green.opacity(0.9) : NIOThemePaint.text)
+                                Image(systemName: "chevron.up.chevron.down")
+                                    .font(.system(size: 8, weight: .semibold))
+                                    .foregroundStyle(NIOThemePaint.text.opacity(0.5))
+                            }
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 6)
+                            .background(NIOThemePaint.well)
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                            .overlay(RoundedRectangle(cornerRadius: 8).stroke(NIOThemePaint.stroke, lineWidth: 0.8))
+                        }
+                    }
                 }
 
                 Text("💡 说明：使用「智能识别」或「Shadowrocket 直推」时会自动填入以上所有参数，无需手动逐项配置。")
@@ -1318,6 +1390,30 @@ struct IOSNIOConfigView: View {
                     .background(NIOThemePaint.fill)
                     .clipShape(RoundedRectangle(cornerRadius: 8))
                 }
+
+                Divider().background(NIOThemePaint.stroke)
+
+                // 灵动岛手动开关：被长按强制下岛后在此一键复活上岛；关闭立即结束全部实时活动
+                Toggle(isOn: Binding(
+                    get: { service.isLiveActivityActive },
+                    set: { on in
+                        if on {
+                            service.raiseLiveActivityFromControl()
+                        } else {
+                            service.stopLiveActivity()
+                        }
+                    }
+                )) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("🏝️ 灵动岛实时监控")
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundStyle(NIOThemePaint.text)
+                        Text("开启立即重新上岛（长按强制下岛后可在此复活）；关闭将立即结束灵动岛与锁屏实时活动")
+                            .font(.system(size: 9))
+                            .foregroundStyle(NIOThemePaint.text.opacity(0.55))
+                    }
+                }
+                .tint(sakuraPink)
 
                 Divider().background(NIOThemePaint.stroke)
 
@@ -1595,11 +1691,21 @@ struct IOSNIOConfigView: View {
         }
     }
 
+    /// 配置页可选的签名算法（与 NIOVehicleLib.computeWidgetSign 支持的算法一致）
+    private static let supportedSignAlgos = ["md5_full", "md5_append", "md5_prepend", "md5_append_key"]
+
+    private static let tokenExpiryFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MM-dd"
+        return formatter
+    }()
+
     private func algoDisplayName(_ algo: String) -> String {
         switch algo {
         case "md5_append": return "MD5 (Query + Secret) [推荐]"
         case "md5_prepend": return "MD5 (Secret + Query)"
         case "md5_append_key": return "MD5 (Query + &key=Secret)"
+        case "md5_full": return "MD5 (Method+Path+Query+Secret+Auth) [Android 逆向]"
         default: return algo
         }
     }

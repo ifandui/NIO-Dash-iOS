@@ -39,6 +39,7 @@ struct NIOSmartParseResult {
     var mode: String?              // "url" | "widget"
     var vehicleURL: String?
     var vehicleToken: String?
+    var userToken: String?
     var vehicleId: String?
     var deviceId: String?
     var sign: String?
@@ -94,6 +95,27 @@ enum NIOVehicleLib {
         }
     }
 
+    /// 蔚来 Android 客户端真实签名算法（HttpUtils.d + CryptoUtils.z 逆向，抓包双样本实测）：
+    /// sign = md5_hex( METHOD + path + "?" + sorted("k=v"&...) + appSecret + Authorization完整头值 )
+    /// 空值参数与 sig/sign 前缀参数不参与；Authorization 为请求实际发送的完整头值（如 "Bearer 2.0..."），
+    /// 无鉴权头的接口（如离线包上报）该段为空串。
+    static func computeAndroidSign(
+        method: String,
+        path: String,
+        params: [String: String],
+        secret: String,
+        authorization: String?
+    ) -> String {
+        let canonical = params
+            .filter { !$0.value.isEmpty }
+            .filter { !$0.key.lowercased().hasPrefix("sig") }
+            .map { "\($0.key)=\($0.value)" }
+            .sorted()
+            .joined(separator: "&")
+        let auth = authorization ?? ""
+        return md5("\(method)\(path)?\(canonical)\(secret)\(auth)")
+    }
+
     // MARK: - 动态 Widget URL 构建
 
     static func buildWidgetURL(
@@ -108,7 +130,8 @@ enum NIOVehicleLib {
         lang: String = "zh-CN",
         appId: String = "10002",
         functions: String = "rvs_run_frequent_appointment,rvs_set_defender_mode,rvs_rpa_out,rvs_exe_findme",
-        size: String = "medium"
+        size: String = "medium",
+        authorization: String? = nil
     ) -> (url: URL, timestamp: String, sign: String)? {
         guard !vehicleId.isEmpty, !deviceId.isEmpty else { return nil }
 
@@ -128,7 +151,19 @@ enum NIOVehicleLib {
 
         let signValue: String
         if let sec = secret, !sec.isEmpty {
-            signValue = computeWidgetSign(params: params, secret: sec, algo: algo)
+            // md5_full（Android/iOS 通用逆向算法）需要 METHOD+path 与 Authorization 完整头值；
+            // 实测（iOS 6.5.3 抓包三重验证）：widget/info 用 app_id=10001 + vehicle_token 命中。
+            if algo == "md5_full" {
+                signValue = computeAndroidSign(
+                    method: "GET",
+                    path: "/app/api/icar/v2/widget/info",
+                    params: params,
+                    secret: sec,
+                    authorization: authorization
+                )
+            } else {
+                signValue = computeWidgetSign(params: params, secret: sec, algo: algo)
+            }
         } else if let fs = fixedSign, !fs.isEmpty {
             signValue = fs
         } else {
@@ -149,10 +184,14 @@ enum NIOVehicleLib {
         let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return res }
 
+        // 供模糊扫描（URL/Token 正则）的文本：JSON 载荷会剔除抓包样本字段，
+        // 避免 command_samples / poseidon_samples 里的车控/扫码 URL 与 token 被误填进凭证
+        var scanText = trimmed
+
         // 0. 支持直接粘贴 auto_sniff 生成的 JSON 格式
         if trimmed.hasPrefix("{") && trimmed.hasSuffix("}") {
             if let data = trimmed.data(using: .utf8),
-               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+               var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
                 if let mode = json["mode"] as? String, !mode.isEmpty { res.mode = mode }
                 if let vUrl = json["vehicle_url"] as? String, !vUrl.isEmpty { res.vehicleURL = vUrl }
                 if let wUrl = json["widget_url"] as? String, !wUrl.isEmpty {
@@ -162,6 +201,9 @@ enum NIOVehicleLib {
                 }
                 if let vTok = json["vehicle_token"] as? String, !vTok.isEmpty {
                     res.vehicleToken = vTok.replacingOccurrences(of: "Bearer ", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
+                }
+                if let uTok = json["user_token"] as? String, !uTok.isEmpty {
+                    res.userToken = uTok.replacingOccurrences(of: "Bearer ", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
                 }
                 if let vId = json["vehicle_id"] as? String, !vId.isEmpty { res.vehicleId = vId }
                 if let dId = json["device_id"] as? String, !dId.isEmpty { res.deviceId = dId }
@@ -181,13 +223,26 @@ enum NIOVehicleLib {
                 if let av = json["app_ver"] as? String, !av.isEmpty { res.appVer = av }
                 if let ua = json["user_agent"] as? String, !ua.isEmpty { res.userAgent = ua }
                 if let ug = json["user_guid"] as? String, !ug.isEmpty { res.userGuid = ug }
+
+                // 过滤抓包样本：剔除车控/扫码链路样本与非凭证杂项后重新序列化，
+                // 让后续模糊扫描只看凭证字段，样本里的 URL/token 不会污染填充
+                let noiseKeys = ["command_samples", "poseidon_samples", "source", "sniffed_at"]
+                let removed = noiseKeys.filter { json[$0] != nil }
+                if !removed.isEmpty {
+                    for key in removed { json.removeValue(forKey: key) }
+                    if let cleanedData = try? JSONSerialization.data(withJSONObject: json),
+                       let cleanedText = String(data: cleanedData, encoding: .utf8) {
+                        scanText = cleanedText
+                        res.notes.append("已过滤抓包样本字段（\(removed.joined(separator: "/"))），不影响凭证填充")
+                    }
+                }
             }
         }
 
         // 1. 尝试抽取 Authorization Bearer Token (支持 base64 中的 +, /, =)
         if res.vehicleToken == nil || res.vehicleToken?.isEmpty == true {
-            if let match = trimmed.range(of: #"(?:Bearer\s+|Authorization:\s*Bearer\s*|\"vehicle_token\":\s*\"(?:Bearer\s*)?)([A-Za-z0-9\-_./+=]+)"#, options: .regularExpression) {
-                let tokenSubstring = trimmed[match]
+            if let match = scanText.range(of: #"(?:Bearer\s+|Authorization:\s*Bearer\s*|\"vehicle_token\":\s*\"(?:Bearer\s*)?)([A-Za-z0-9\-_./+=]+)"#, options: .regularExpression) {
+                let tokenSubstring = scanText[match]
                 let cleanToken = tokenSubstring
                     .replacingOccurrences(of: "Authorization:", with: "")
                     .replacingOccurrences(of: "Bearer", with: "")
@@ -202,7 +257,7 @@ enum NIOVehicleLib {
         }
 
         // 2. 检查是否为完整 URL / cURL
-        let urlStrings = trimmed.components(separatedBy: .whitespacesAndNewlines).filter { $0.hasPrefix("http://") || $0.hasPrefix("https://") }
+        let urlStrings = scanText.components(separatedBy: .whitespacesAndNewlines).filter { $0.hasPrefix("http://") || $0.hasPrefix("https://") }
         for rawUrl in urlStrings {
             let initialUrl = rawUrl.trimmingCharacters(in: CharacterSet(charactersIn: "\"'`,;"))
             guard let components = URLComponents(string: initialUrl) else { continue }
@@ -286,8 +341,8 @@ enum NIOVehicleLib {
 
         // 3. 纯 Token 粘贴容错
         if res.vehicleURL == nil && res.changeURL == nil && res.checkinURL == nil {
-            if trimmed.hasPrefix("eyJ") || trimmed.count > 40 {
-                let token = trimmed.replacingOccurrences(of: "Bearer ", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
+            if scanText.hasPrefix("eyJ") || scanText.count > 40 {
+                let token = scanText.replacingOccurrences(of: "Bearer ", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
                 res.vehicleToken = token
                 res.notes.append("识别为纯 Token 文本")
             }
@@ -310,12 +365,215 @@ enum NIOVehicleLib {
         return nil
     }
 
+    /// RVS 重签自校验档位缓存：host+path → (secret, 算法名, 原始顺序, auth 参与)。
+    /// 仅在主线程读写（buildRvsTargetURLs 调用链）。
+    private static var rvsSignProfiles: [String: (secret: String, name: String, raw: Bool, auth: Bool)] = [:]
+
+    // MARK: - 逆向内置常量（Android 客户端 6.9.6 堆挖 + CryptoUtils.z 反编译实测）
+
+    /// Android 客户端签名密钥（app_id=10001）。服务端按请求 app_id 参数选择对应 secret 验签；
+    /// 该值静态存储于服务端与客户端，永不过期。
+    /// 安全策略：真实密钥不进 git 仓库——本地构建从 Bundle 的 NIO_Secrets.plist（已 gitignore）读取；
+    /// 仓库构建返回空串，需在设置页「签名密钥」手动填入（UserDefaults 持久化，与手动录入一致）。
+    static let builtinSignSecret: String = {
+        guard let url = Bundle.main.url(forResource: "NIO_Secrets", withExtension: "plist"),
+              let dict = NSDictionary(contentsOf: url) as? [String: Any],
+              let sec = dict["sign_secret"] as? String else { return "" }
+        return sec
+    }()
+    /// Android 客户端 app_id（与 builtinSignSecret 配对）
+    static let androidAppID = "10001"
+    /// iOS 客户端 app_id（独立 secret，未知；抓包到 10002 时需转换为 Android 身份）
+    static let iOSAppID = "10002"
+
+    // MARK: - 车控指令（iOS 6.5.3 包逆向：REST 异步命令通道 + PIN 服务密码）
+
+    /// 车控 REST 命令基座（iOS 包 strings 逆向：POST /api/1/vehicle/command/{function} → command_id → 轮询）
+    static let commandBaseURL = "https://tsp.nio.com/api/1/vehicle/command/"
+    /// 服务密码（PIN）验证端点（iOS 包 strings 逆向）
+    static let verifyPinURL = "https://tsp.nio.com/api/1/poseidon/verify_pin"
+    /// PIN 加密公钥（iOS 包 strings 逆向，SPKI PEM；App 内 encrypt(pinCode:) 用 RSA/PKCS1 加密后提交）
+    static let pinRSAPublicKeyPEM = """
+    -----BEGIN PUBLIC KEY-----
+    MIIBIDANBgkqhkiG9w0BAQEFAAOCAQ0AMIIBCAKCAQEAqSIG46xubZbe766XQeYM
+    qivtL61CerAhW05LTd3jAxliYUej+SHSyOY2soHszqfC3FHAPe7H1N0MrXPE3w08
+    DNodFc2GWolnECA3gRHOu2ILcsYnviwO9XO6DpQmpRWojiXpBlF5ysmXG4EHFaJ1
+    8TzQOzew3zWixAY/bef5BJU5L+KOhK5yO16JCgUIvhw+cykF7/mXjMujMWiara6M
+    azHuS642QLd93DzdrvAU8doF0DOX5ZOSuE/tkl3FXTBjZ4DkMCL22iJivHK9nrdB
+    uHizxMp32zCVJIpDF4cF79PBEjTGml6IvM/ftqty96edoBCCHGDZUETA/8bZCS2E
+    EwIBAw==
+    -----END PUBLIC KEY-----
+    """
+
+    /// 车控指令元数据（UI 展示 + 敏感级标记）
+    struct CommandEntry {
+        let function: String
+        let title: String
+        let icon: String
+        let sensitive: Bool
+    }
+
+    /// 车控指令全集（iOS 包 rvs 指令名逆向）
+    static let vehicleCommandEntries: [CommandEntry] = [
+        CommandEntry(function: "rvs_set_doorlock", title: "锁车", icon: "lock.fill", sensitive: false),
+        CommandEntry(function: "rvs_set_air_conditioner", title: "空调", icon: "fanblades.fill", sensitive: false),
+        CommandEntry(function: "rvs_set_windows_sunroof", title: "车窗", icon: "square.split.2x1.fill", sensitive: true),
+        CommandEntry(function: "rvs_set_tailgate", title: "尾门", icon: "car.rear.fill", sensitive: true),
+        CommandEntry(function: "rvs_exe_findme", title: "寻车", icon: "light.beacon.max.fill", sensitive: false),
+        CommandEntry(function: "rvs_set_chrg", title: "充电", icon: "bolt.fill", sensitive: true),
+        CommandEntry(function: "rvs_set_lamp", title: "大灯", icon: "lightbulb.fill", sensitive: false),
+        CommandEntry(function: "rvs_set_defender_mode", title: "守卫", icon: "shield.lefthalf.filled", sensitive: false),
+        // 扩展指令集（iOS 包 strings 逆向二次挖掘）
+        CommandEntry(function: "rvs_set_rearview_mirror", title: "后视镜", icon: "rectangle.landscape.rotate", sensitive: true),
+        CommandEntry(function: "rvs_set_sunblind", title: "遮阳帘", icon: "blinds.horizontal.closed", sensitive: false),
+        CommandEntry(function: "rvs_set_glove_box", title: "手套箱", icon: "shippingbox.fill", sensitive: true),
+        CommandEntry(function: "rvs_seats_heating", title: "座椅加热", icon: "heat.element.shape", sensitive: false),
+        CommandEntry(function: "rvs_set_btry_warm", title: "电池预热", icon: "battery.100.bolt", sensitive: false),
+        CommandEntry(function: "rvs_set_poweroutlet", title: "对外放电", icon: "powerplug.fill", sensitive: true),
+        CommandEntry(function: "rvs_set_engine_hood", title: "前舱盖", icon: "car.front.waves.up.fill", sensitive: true),
+        CommandEntry(function: "rvs_set_immobilizer", title: "发动机禁用", icon: "engine.combustion.badge.exclamationmark", sensitive: true),
+    ]
+
+    /// 车控 POST body 参与签名的两种档位（逆向实测：POST 的 JSON body 必须参与签名，
+    /// 未签 body 服务端返回 403 invalid sign；车控通道的具体并入手法无抓包样本，双档位重试覆盖）
+    enum CommandSignMode {
+        case mergedIntoQuery   // 档位A：body JSON 键值对（字符串化）并入 sorted query 参与签名
+        case rawAppend         // 档位B：原始 JSON body 字符串整体拼在 query 串后参与签名
+    }
+
+    /// 构建车控 POST 命令请求（md5_full 签名；POST body 参与签名，档位由 signMode 指定）
+    static func buildCommandRequest(
+        function: String,
+        vehicleId: String,
+        deviceId: String,
+        secret: String,
+        authorization: String?,
+        bodyJSON: String = "",
+        extraQuery: [String: String] = [:],
+        signMode: CommandSignMode = .mergedIntoQuery
+    ) -> (url: URL, sign: String, timestamp: String)? {
+        guard !vehicleId.isEmpty else { return nil }
+        let path = "/api/1/vehicle/command/\(function)"
+        var params: [String: String] = [
+            "app_id": androidAppID,
+            "app_ver": "6.5.3",
+            "device_id": deviceId.isEmpty ? "iOS_Device_\(vehicleId.prefix(6))" : deviceId,
+            "vehicle_id": vehicleId,
+            "lang": "zh-CN",
+            "region": "cn"
+        ]
+        for (k, v) in extraQuery { params[k] = v }
+        let ts = String(Int(Date().timeIntervalSince1970))
+        params["timestamp"] = ts
+
+        // 档位A：把 body JSON 的键值对（转为字符串）并入待签名参数表
+        if signMode == .mergedIntoQuery,
+           let data = bodyJSON.data(using: .utf8),
+           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            for (k, v) in obj {
+                let strVal: String
+                switch v {
+                case let s as String: strVal = s
+                case let n as NSNumber: strVal = n.stringValue
+                case let b as Bool: strVal = b ? "true" : "false"
+                default: continue
+                }
+                if !strVal.isEmpty { params[k] = strVal }
+            }
+        }
+
+        let sign = computeAndroidSign(method: "POST", path: path, params: params, secret: secret, authorization: authorization)
+        params["sign"] = sign
+        let canon = params.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: "&")
+
+        // 档位B：原始 JSON body 整体拼进签名输入串（在 secret 之前）
+        let finalSign: String
+        if signMode == .rawAppend, !bodyJSON.isEmpty {
+            finalSign = md5("POST\(path)?\(canon)\(bodyJSON)\(secret)\(authorization ?? "")")
+        } else {
+            finalSign = sign
+        }
+        if signMode == .rawAppend {
+            params["sign"] = finalSign
+        }
+
+        guard let url = URL(string: "https://tsp.nio.com\(path)?\(canon)") else { return nil }
+        return (url, signMode == .rawAppend ? finalSign : sign, ts)
+    }
+
+    /// 构建车控命令结果轮询 GET（同一签名体系）
+    static func buildCommandPollRequest(
+        commandID: String,
+        vehicleId: String,
+        deviceId: String,
+        secret: String,
+        authorization: String?
+    ) -> URL? {
+        let path = "/api/1/vehicle/command/\(commandID)"
+        var params: [String: String] = [
+            "app_id": androidAppID,
+            "app_ver": "6.5.3",
+            "device_id": deviceId.isEmpty ? "iOS_Device_\(vehicleId.prefix(6))" : deviceId,
+            "vehicle_id": vehicleId,
+            "lang": "zh-CN",
+            "region": "cn",
+            "timestamp": String(Int(Date().timeIntervalSince1970))
+        ]
+        let sign = computeAndroidSign(method: "GET", path: path, params: params, secret: secret, authorization: authorization)
+        params["sign"] = sign
+        let canon = params.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: "&")
+        return URL(string: "https://tsp.nio.com\(path)?\(canon)")
+    }
+
+    /// RSA/PKCS1 加密服务密码（iOS 包 encrypt(pinCode:) 逆向）：
+    /// PEM(SPKI) → 内层 PKCS#1 RSAPublicKey DER → SecKey 加密 → base64。
+    static func encryptPinCode(_ pin: String) -> String? {
+        // 1. PEM → SPKI DER
+        let b64 = pinRSAPublicKeyPEM
+            .split(separator: "\n")
+            .filter { !$0.contains("-----") }
+            .joined()
+        guard var der = Data(base64Encoded: b64) else { return nil }
+        // 2. SPKI 剥壳：外层 SEQUENCE + AlgorithmIdentifier SEQUENCE + BIT STRING 头 → 内层 PKCS#1
+        func tlv(_ data: Data, _ offset: inout Int) -> (tag: UInt8, content: Data)? {
+            guard offset + 2 <= data.count else { return nil }
+            let tag = data[data.startIndex + offset]; offset += 1
+            var len = Int(data[data.startIndex + offset]); offset += 1
+            if len & 0x80 != 0 {
+                let n = len & 0x7F
+                guard n <= 4, offset + n <= data.count else { return nil }
+                len = 0
+                for _ in 0..<n { len = (len << 8) | Int(data[data.startIndex + offset]); offset += 1 }
+            }
+            guard offset + len <= data.count else { return nil }
+            let content = data.subdata(in: (data.startIndex + offset)..<(data.startIndex + offset + len))
+            offset += len
+            return (tag, content)
+        }
+        var off = 0
+        guard let outer = tlv(der, &off), outer.tag == 0x30 else { return nil } // SubjectPublicKeyInfo SEQUENCE
+        off = 0
+        guard let alg = tlv(outer.content, &off), alg.tag == 0x30 else { return nil } // AlgorithmIdentifier
+        guard let bits = tlv(outer.content, &off), bits.tag == 0x03, bits.content.count > 1 else { return nil } // BIT STRING
+        // BIT STRING content: [unused-bit-count byte][PKCS#1 RSAPublicKey DER]
+        let pkcs1 = bits.content.subdata(in: (bits.content.startIndex + 1)..<bits.content.endIndex)
+        // 3. SecKey（PKCS#1 DER → SecKey）
+        guard let key = SecKeyCreateWithData(pkcs1 as CFData,
+                                             [kSecAttrKeyType: kSecAttrKeyTypeRSA, kSecAttrKeyClass: kSecAttrKeyClassPublic] as CFDictionary,
+                                             nil) else { return nil }
+        // 4. RSA/PKCS1v1.5 加密
+        var err: Unmanaged<CFError>?
+        guard let enc = SecKeyCreateEncryptedData(key, .rsaEncryptionPKCS1, Data(pin.utf8) as CFData, &err) as Data? else { return nil }
+        return enc.base64EncodedString()
+    }
+
+
     /// 对抓包的完整 RVS URL 动态重签名（与 Widget 模式同一套密钥体系）：
     /// 先用 secret/algo 对抓包参数（含原 timestamp、不含 sign）重算签名，与 URL 内 sign 比对自校验；
     /// 校验通过说明该密钥适用于 RVS 接口，随后每次拉取都换新 timestamp 并重算 sign——
     /// 既保留 field=tyre 等完整状态块参数（胎压不丢），又不会再因 sign/timestamp 过期而失效。
     /// 校验不通过（未配置密钥或算法/拼串方式不符）返回 nil，调用方回退为原样重放抓包 URL。
-    static func autoResignRvsURL(_ urlString: String, secret: String, algo: String) -> String? {
+    static func autoResignRvsURL(_ urlString: String, secret: String, algo: String, authorization: String? = nil) -> String? {
         let sec = secret.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !sec.isEmpty, let qStart = urlString.firstIndex(of: "?") else { return nil }
 
@@ -337,6 +595,15 @@ enum NIOVehicleLib {
         }
         guard let originSign = capturedSign?.lowercased(), !pairs.isEmpty else { return nil }
 
+        // iOS 抓包（app_id=10002）自动伪装成 Android：iOS secret 未知、旧 sign 必然无法自校验，
+        // 实测服务端先按请求 app_id 参数选 secret 验签、再验 token 会话——故直接切换 app_id=10001
+        // 并强制 md5_full（Android 真实算法）重签，无需比对旧 sign。
+        let isIOSCapture = pairs.contains { $0.key == "app_id" && $0.value == iOSAppID }
+        if isIOSCapture, let idx = pairs.firstIndex(where: { $0.key == "app_id" }) {
+            pairs[idx].value = androidAppID
+        }
+        let forceAndroidResign = isIOSCapture
+
         func canonicalSorted(_ list: [(key: String, value: String)]) -> String {
             list.map { "\($0.key)=\($0.value)" }.sorted().joined(separator: "&")
         }
@@ -344,29 +611,53 @@ enum NIOVehicleLib {
         func canonicalRaw(_ list: [(key: String, value: String)]) -> String {
             list.map { "\($0.key)=\($0.value)" }.joined(separator: "&")
         }
-        func compute(_ canonical: String, _ algoName: String) -> String {
+        // md5_full（Android 客户端真实算法）需要 path 与 Authorization 完整头值参与
+        let method = "GET"
+        let path = base.replacingOccurrences(of: "^https?://[^/]+", with: "", options: .regularExpression)
+        let authValue = authorization?.isEmpty == false ? authorization! : ""
+        func compute(_ canonical: String, _ algoName: String, withAuth: Bool) -> String {
             switch algoName {
             case "md5_prepend": return md5(sec + canonical)
             case "md5_append_key": return md5("\(canonical)&key=\(sec)")
+            case "md5_full": return md5("\(method)\(path)?\(canonical)\(sec)\(withAuth ? authValue : "")")
             default: return md5(canonical + sec)
             }
         }
 
-        // 依次尝试配置的算法与三种常见变体 × 排序/原始顺序两种拼串，命中抓包 sign 即确认密钥与拼串方式
-        let candidates = [algo, "md5_append", "md5_prepend", "md5_append_key"]
-        var seen = Set<String>()
+        // md5_full 的签名含 Authorization 尾串，token 轮换后旧抓包 sign 无法复现——
+        // 首次自校验通过后缓存该 host+path 的签名档（含所用 secret），后续直接复用重签。
         var verifiedName: String? = nil
         var verifiedRaw = false
-        for a in candidates {
-            let name = a.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !name.isEmpty, seen.insert(name).inserted else { continue }
-            if compute(canonicalSorted(pairs), name) == originSign {
-                verifiedName = name; verifiedRaw = false
-                break
+        var verifiedAuth = false
+        let profileKey = forceAndroidResign ? base + "#ios" : base
+        if let cached = rvsSignProfiles[profileKey], cached.secret == sec {
+            verifiedName = cached.name; verifiedRaw = cached.raw; verifiedAuth = cached.auth
+        } else {
+            rvsSignProfiles[profileKey] = nil
+            if forceAndroidResign {
+                verifiedName = "md5_full"
+                verifiedRaw = false
+                verifiedAuth = !authValue.isEmpty
+            } else {
+                let candidates = [algo, "md5_append", "md5_prepend", "md5_append_key", "md5_full"]
+                var seen = Set<String>()
+                outer: for a in candidates {
+                    let name = a.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !name.isEmpty, seen.insert(name).inserted else { continue }
+                    for withAuth in [true, false] {
+                        if compute(canonicalSorted(pairs), name, withAuth: withAuth) == originSign {
+                            verifiedName = name; verifiedRaw = false; verifiedAuth = withAuth
+                            break outer
+                        }
+                        if compute(canonicalRaw(pairs), name, withAuth: withAuth) == originSign {
+                            verifiedName = name; verifiedRaw = true; verifiedAuth = withAuth
+                            break outer
+                        }
+                    }
+                }
             }
-            if compute(canonicalRaw(pairs), name) == originSign {
-                verifiedName = name; verifiedRaw = true
-                break
+            if let n = verifiedName {
+                rvsSignProfiles[profileKey] = (secret: sec, name: n, raw: verifiedRaw, auth: verifiedAuth)
             }
         }
         guard let useName = verifiedName else { return nil }
@@ -387,7 +678,7 @@ enum NIOVehicleLib {
             fresh.append(("timestamp", now))
         }
         let canonical = verifiedRaw ? canonicalRaw(fresh) : canonicalSorted(fresh)
-        let newSign = compute(canonical, useName)
+        let newSign = compute(canonical, useName, withAuth: verifiedAuth)
         let newQuery = fresh.map { "\($0.key)=\($0.value)" }.joined(separator: "&") + "&sign=\(newSign)"
         return "\(base)?\(newQuery)"
     }
@@ -1117,7 +1408,8 @@ enum NIOVehicleLib {
         let icon: String
     }
 
-    static func parseAvailableDoors(doorStatus: [String: NIOJSONValue]?, windowStatus: [String: NIOJSONValue]?) -> [ParsedDoorItem] {
+    /// - Parameter isCharging: 充电中时充电口盖开启属正常插枪状态，不判为告警
+    static func parseAvailableDoors(doorStatus: [String: NIOJSONValue]?, windowStatus: [String: NIOJSONValue]?, isCharging: Bool = false) -> [ParsedDoorItem] {
         let doors = doorStatus ?? [:]
         var items: [ParsedDoorItem] = []
 
@@ -1145,9 +1437,10 @@ enum NIOVehicleLib {
         let rr = doors["door_ajar_rear_right_status"]?.intValue ?? doors["rear_right_door_ajar_status"]?.intValue ?? doors["door_ajr_sts_rr"]?.intValue ?? doors["door_rr"]?.intValue ?? 1
         items.append(ParsedDoorItem(id: "door_rr", title: "右后门", isClosed: rr == 1, customClosedLabel: "关好 🐾", customOpenLabel: "未关好 ⚠️", icon: rr == 1 ? "car.side.fill" : "car.side.rear.open.fill"))
 
-        // 7. 充电口盖 (如果存在字段)
+        // 7. 充电口盖 (如果存在字段)；充电插枪时口盖开启是正常状态，按正常显示
         if let chrg = doors["second_charge_port_ajar_status"]?.intValue ?? doors["second_charge_port_cap"]?.intValue ?? doors["charge_port_status"]?.intValue ?? doors["charge_port"]?.intValue {
-            items.append(ParsedDoorItem(id: "charge_port", title: "充电口盖", isClosed: chrg == 1, customClosedLabel: "闭好 🐾", customOpenLabel: "开启 ⚠️", icon: chrg == 1 ? "powerplug.fill" : "bolt.badge.automatic.fill"))
+            let portNormal = chrg == 1 || isCharging
+            items.append(ParsedDoorItem(id: "charge_port", title: "充电口盖", isClosed: portNormal, customClosedLabel: isCharging && chrg != 1 ? "充电中 🔌" : "闭好 🐾", customOpenLabel: "开启 ⚠️", icon: portNormal ? "powerplug.fill" : "bolt.badge.automatic.fill"))
         }
 
         // 8. 整车车锁

@@ -74,13 +74,12 @@ struct WheaterStatusLiveActivityWidget: Widget {
                     VStack(spacing: 2) {
                         islandStatusView(state)
                         if state.isCharging, let eta = state.chargeEtaDate {
-                            HStack(spacing: 2) {
-                                Text("充满")
-                                Text(eta, style: .relative)
-                                Text("后")
-                            }
-                            .font(.system(size: 9, weight: .semibold))
-                            .foregroundStyle(.green.opacity(0.9))
+                            // 倒计时后缀并入同一 Text：避免相对时间宽度变化时"后"字独立换槽抖动/错位
+                            Text("充满 \(eta, style: .relative)后")
+                                .font(.system(size: 9, weight: .semibold))
+                                .foregroundStyle(.green.opacity(0.9))
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.75)
                         }
                     }
                 }
@@ -166,6 +165,21 @@ struct WheaterStatusLiveActivityWidget: Widget {
                                     .font(.system(size: 8, weight: .bold))
                                     .foregroundStyle(.yellow)
                             }
+                            if state.hiDryActive == true {
+                                Text("♨️ 干燥")
+                                    .font(.system(size: 8, weight: .bold))
+                                    .foregroundStyle(.orange)
+                            }
+                            if state.defrostActive == true {
+                                Text("❄️ 除霜")
+                                    .font(.system(size: 8, weight: .bold))
+                                    .foregroundStyle(.cyan)
+                            }
+                            if state.overheatProtectActive == true {
+                                Text("🌡️ 过热保护")
+                                    .font(.system(size: 8, weight: .bold))
+                                    .foregroundStyle(.red)
+                            }
                             if let lv = state.lvBattSoc, lv > 0, lv < 30 {
                                 Text("12V \(lv)%")
                                     .font(.system(size: 8, weight: .bold, design: .monospaced))
@@ -249,6 +263,8 @@ struct WheaterStatusLiveActivityWidget: Widget {
                 Label(state.chargeStateText, systemImage: "bolt.fill")
                     .font(.system(size: 11, weight: .bold, design: .rounded))
                     .foregroundStyle(.green)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
             )
         }
         if state.defenderActive {
@@ -277,6 +293,27 @@ struct WheaterStatusLiveActivityWidget: Widget {
                 Text("🔋 离车不下电")
                     .font(.system(size: 10, weight: .semibold))
                     .foregroundStyle(.cyan)
+            )
+        }
+        if state.hiDryActive == true {
+            return AnyView(
+                Label("超强干燥中", systemImage: "heat.waves")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.orange)
+            )
+        }
+        if state.defrostActive == true {
+            return AnyView(
+                Label("极速除霜中", systemImage: "windshield.front.defrost")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.cyan)
+            )
+        }
+        if state.overheatProtectActive == true {
+            return AnyView(
+                Text("🌡️ 座舱过热保护")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.red)
             )
         }
         if state.isDriving == true {

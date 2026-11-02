@@ -48,6 +48,10 @@ struct WheaterAttributes: ActivityAttributes {
         var frdgActive: Bool?        // 车载冰箱
         var frdgTemp: Double?        // 冰箱当前温
         var v2lActive: Bool?         // 对外放电
+        // 特殊模式（可选字段，旧负载缺省安全解码为 nil）
+        var hiDryActive: Bool?       // 超强干燥（座舱高温干燥）cbn_hi_t_dry_sts
+        var defrostActive: Bool?     // 极速除霜 ccu_max_defrst_sts
+        var overheatProtectActive: Bool? // 座舱过热保护 cbn_ovr_ht_act_sts
 
         // 更新时间
         var updateTimestamp: Date
@@ -123,6 +127,9 @@ struct WheaterAttributes: ActivityAttributes {
                 powerHoldActive ? "H" : "-",
                 (frdgActive ?? false) ? "F" : "-",
                 (v2lActive ?? false) ? "V" : "-",
+                (hiDryActive ?? false) ? "Y" : "-",
+                (defrostActive ?? false) ? "Z" : "-",
+                (overheatProtectActive ?? false) ? "O" : "-",
                 lvBattSoc.map { "\($0)" } ?? "-",
                 vehicleVersion ?? "-",
                 chargeEtaDate.map { "\(Int($0.timeIntervalSince1970 / 300))" } ?? "-",

@@ -81,6 +81,26 @@ const LOCAL_PUSH_URL = "http://127.0.0.1:8997/credentials";
     if (userAgent && (isMainAppUA || !stored.user_agent)) stored.user_agent = userAgent;
     if (userGuid)       stored.user_guid     = userGuid;
 
+    // ── v3 新增①：用户级 access_token 识别 ──
+    // 主 App（非 Widget 小组件）会话的 token 才有车控 / RVS / 蓝牙钥匙权限；
+    // 小组件 VehicleWidgetExtension 抓到的车级 token 调车控会返回 no access found。
+    const isCommandReq = url.includes("/api/1/vehicle/command/") ||
+                         url.includes("/api/2/ws/command/connect") ||
+                         url.includes("/api/1/sec/iot/platform/thing/commands");
+    if (token && isMainAppUA) stored.user_token = token;
+
+    // ── v3 新增②：官方车控指令原文捕获（逆向对照端点 + body 格式 + 签名参与方式）──
+    // 在官方蔚来 App 里点任意车控按钮（锁车/空调/寻车…），此处记录完整请求
+    if (isCommandReq) {
+        const sample = {
+            time:   new Date().toLocaleTimeString("zh-CN", { hour12: false }),
+            method: ($request.method || "POST").toUpperCase(),
+            url:    url,
+            body:   typeof $request.body === "string" ? $request.body : ($request.body ? JSON.stringify($request.body) : "")
+        };
+        stored.command_samples = [sample].concat(stored.command_samples || []).slice(0, 5);
+    }
+
     stored.change_url  = appVer ? DEFAULT_CHANGE_URL.replace(/app_ver=[\d.]+/, "app_ver=" + appVer) : DEFAULT_CHANGE_URL;
     stored.checkin_url = DEFAULT_CHECKIN_URL;
     if (token) { stored.change_token = token; stored.checkin_token = token; }
@@ -117,6 +137,8 @@ const LOCAL_PUSH_URL = "http://127.0.0.1:8997/credentials";
             app_ver:       stored.app_ver       || "",
             user_agent:    stored.user_agent    || "",
             user_guid:     stored.user_guid     || "",
+            user_token:    stored.user_token    || "",
+            command_samples: stored.command_samples || [],
             source:        "shadowrocket"
         });
 
@@ -137,7 +159,14 @@ const LOCAL_PUSH_URL = "http://127.0.0.1:8997/credentials";
     // ④ 系统通知兜底
     try {
         if (typeof $notification !== "undefined") {
-            if (isFullRvs) {
+            if (isCommandReq) {
+                const fn = (stored.command_samples && stored.command_samples[0] && stored.command_samples[0].body || "").match(/"function"\s*:\s*"([^"]+)"/);
+                $notification.post(
+                    "🎯 已捕获官方车控指令原文" + (fn ? "·" + fn[1] : ""),
+                    "端点+body+签名已存档并直推 App 诊断",
+                    "在 YumikoToys 诊断页 category=command_capture 查看"
+                );
+            } else if (isFullRvs) {
                 $notification.post(
                     "🎉 蔚来【爱车主页】凭证已捕获！",
                     "Token + 4 轮胎压全部就绪",

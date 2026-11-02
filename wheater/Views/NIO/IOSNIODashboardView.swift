@@ -718,6 +718,7 @@ struct IOSNIODashboardView: View {
             LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
                 StatusTile(icon: "lock.fill", title: "车锁", value: isLocked ? "已上锁" : "未上锁", tint: isLocked ? .green : .orange)
                 StatusTile(icon: "door.left.hand.open", title: "车门", value: allDoorsClosed ? "已关好" : "请检查", tint: allDoorsClosed ? .green : .orange)
+                StatusTile(icon: "car.rear.fill", title: "尾门", value: tailgateClosed ? "已关闭" : "未关闭", tint: tailgateClosed ? .green : .orange)
                 StatusTile(icon: "window.vertical.open", title: "车窗", value: windowsClosed ? "已关闭" : "有开启", tint: windowsClosed ? .green : .orange)
                 StatusTile(icon: "thermometer.medium", title: "座舱温度", value: temperatureText, tint: .cyan)
             }
@@ -757,7 +758,7 @@ struct IOSNIODashboardView: View {
 
     private var protectionCard: some View {
         NIOSectionCard(title: "车辆防护", subtitle: "门、窗与连接状态") {
-                let entries = NIOVehicleLib.parseAvailableDoors(doorStatus: status?.doorStatus, windowStatus: status?.windowStatus)
+                let entries = NIOVehicleLib.parseAvailableDoors(doorStatus: status?.doorStatus, windowStatus: status?.windowStatus, isCharging: isCharging)
                 VStack(spacing: 0) {
                     ForEach(entries) { item in
                         HStack(spacing: 12) {
@@ -781,6 +782,8 @@ struct IOSNIODashboardView: View {
         NIOSectionCard(title: "座舱与系统", subtitle: "空调、车机与低压电瓶") {
             VStack(spacing: 0) {
                 KeyValueRow(label: "空调", value: status?.hvacStatus?.airConditionerOn == true ? "已开启" : "已关闭")
+                Divider()
+                KeyValueRow(label: "特殊模式", value: specialModesText)
                 Divider()
                 KeyValueRow(label: "车外温度", value: degreeText(status?.hvacStatus?.outsideTemperature))
                 Divider()
@@ -858,6 +861,8 @@ struct IOSNIODashboardView: View {
 
     private var overview: some View {
         VStack(spacing: 14) {
+            NIOVehicleControlPanel(service: service)
+            NIOBluetoothKeysCard(service: service)
             statusCard
             energyCard
             NIOEfficiencyCard(soc: soc, batteryCapacityKwh: service.estimateBatteryCapacityKwh(socStatus: soc))
@@ -932,11 +937,27 @@ struct IOSNIODashboardView: View {
         return status?.vehicleId.map { "NIO \($0.suffix(6))" } ?? "我的 NIO"
     }
     private var isLocked: Bool { (status?.doorStatus?["vehicle_lock_status"]?.intValue ?? 1) == 1 }
-    private var allDoorsClosed: Bool { NIOVehicleLib.parseAvailableDoors(doorStatus: status?.doorStatus, windowStatus: nil).filter { $0.id != "vehicle_lock" }.allSatisfy(\.isClosed) }
+    private var allDoorsClosed: Bool { NIOVehicleLib.parseAvailableDoors(doorStatus: status?.doorStatus, windowStatus: nil, isCharging: isCharging).filter { $0.id != "vehicle_lock" }.allSatisfy(\.isClosed) }
     private var windowsClosed: Bool { NIOVehicleLib.parseAvailableDoors(doorStatus: nil, windowStatus: status?.windowStatus).first { $0.id == "windows" }?.isClosed ?? true }
+    /// 尾门独立判定（widget/info door_status.tailgate_ajar_status：1=关 0=开）
+    private var tailgateClosed: Bool { NIOVehicleLib.parseAvailableDoors(doorStatus: status?.doorStatus, windowStatus: nil).first { $0.id == "trunk" }?.isClosed ?? true }
     private var mileageText: String { status?.exteriorStatus?.mileage.map { String(format: "%.0f km", $0) } ?? "--" }
     private var powerText: String { soc?.chargingPower.map { String(format: "%.1f kW", $0 / ($0 > 100 ? 1000 : 1)) } ?? "--" }
     private var temperatureText: String { degreeText(status?.hvacStatus?.temperature) }
+    /// 特殊模式汇总（超强干燥 / 极速除霜 / 座舱过热保护 / 守卫 / 宠物 / 露营 / 离车不下电 / 对外放电）
+    private var specialModesText: String {
+        let hvac = status?.hvacStatus
+        var modes: [String] = []
+        if hvac?.cbnHiTDrySts == 1 { modes.append("♨️ 超强干燥") }
+        if hvac?.ccuMaxDefrstSts == 1 { modes.append("❄️ 极速除霜") }
+        if hvac?.cbnOvrHtActSts == 1 { modes.append("🌡️ 过热保护") }
+        if NIOVehicleLib.defenderModeActive(status?.offcarModeStatus ?? [:]).isActive { modes.append("🛡️ 守卫") }
+        if NIOVehicleLib.modeActive(status?.offcarModeStatus?["pet_mode_status"] ?? status?.offcarModeStatus?["pet_mode"]) { modes.append("🐾 宠物模式") }
+        if NIOVehicleLib.modeActive(status?.offcarModeStatus?["camping_mode_status"] ?? status?.offcarModeStatus?["camping_mode"]) { modes.append("⛺️ 露营模式") }
+        if NIOVehicleLib.modeActive(status?.offcarModeStatus?["power_hold_mode_status"] ?? status?.offcarModeStatus?["power_hold_mode"]) { modes.append("🔋 离车不下电") }
+        if soc?.v2lStatus == 1 { modes.append("🔌 对外放电") }
+        return modes.isEmpty ? "无" : modes.joined(separator: " · ")
+    }
     private var checkinValue: String { service.checkinData.map { "\($0.continuousDays) 天" } ?? "--" }
     private var fotaDisplay: String {
         let fota = status?.fotaStatus
@@ -995,8 +1016,8 @@ private struct NIOAppBackground: View {
     }
 }
 
-/// 刷新结果 / 同行事件横幅：顶部悬浮胶囊，2.8 秒后自动消失（新横幅会重置计时）
-private struct NIOTransientNoticeBanner: View {
+/// 刷新结果 / 同行事件横幅：顶部悬浮胶囊，3.5 秒后自动消失（新横幅会重置计时），点击可提前关闭
+struct NIOTransientNoticeBanner: View {
     let notice: NIOTransientNotice
     let onDismiss: () -> Void
 
@@ -1008,7 +1029,7 @@ private struct NIOTransientNoticeBanner: View {
             Text(notice.message)
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(NIOThemePaint.text)
-                .lineLimit(1)
+                .lineLimit(2)
                 .minimumScaleFactor(0.85)
             Spacer(minLength: 0)
         }
@@ -1021,8 +1042,10 @@ private struct NIOTransientNoticeBanner: View {
         )
         .overlay(Capsule(style: .continuous).stroke(tint.opacity(0.35), lineWidth: 1))
         .padding(.horizontal, 20)
+        .contentShape(Capsule(style: .continuous))
+        .onTapGesture { onDismiss() } // 点击任意位置提前关闭
         .task(id: notice.id) {
-            try? await Task.sleep(nanoseconds: 2_800_000_000)
+            try? await Task.sleep(nanoseconds: 3_500_000_000)
             onDismiss()
         }
     }
@@ -1090,17 +1113,31 @@ private struct NIOParkingLocationCard: View {
 
     @State private var placemarkText: String?
     @State private var isLoadingPlacemark = false
+    // 相机位置绑定态：initialPosition 只在首次渲染生效，车辆位置更新后地图不会跟随；
+    // 改为绑定 position 并在坐标变化时重设，实现停车纠偏/位置更新后地图实时跟随
+    @State private var cameraPosition: MapCameraPosition
 
-    // 蔚来 API 返回的坐标经测试为 WGS-84（与轨迹卡一致，直接使用不做 GCJ-02 转换）
-    private var coordinate: CLLocationCoordinate2D {
-        CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
+    init(latitude: Double, longitude: Double) {
+        self.latitude = latitude
+        self.longitude = longitude
+        let center = CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
+        _cameraPosition = State(initialValue: .region(MKCoordinateRegion(
+            center: center,
+            span: MKCoordinateSpan(latitudeDelta: 0.003, longitudeDelta: 0.003)
+        )))
     }
 
-    private var region: MKCoordinateRegion {
-        MKCoordinateRegion(
+    /// 车辆位置刷新（停车纠偏/重新定位）时平移相机到新坐标
+    private func followUpdatedPosition() {
+        cameraPosition = .region(MKCoordinateRegion(
             center: coordinate,
             span: MKCoordinateSpan(latitudeDelta: 0.003, longitudeDelta: 0.003)
-        )
+        ))
+    }
+
+    /// 蔚来 API 返回的坐标经测试为 WGS-84（与轨迹卡一致，直接使用不做 GCJ-02 转换）
+    private var coordinate: CLLocationCoordinate2D {
+        CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
     }
 
     private var appleMapsURL: URL? {
@@ -1151,14 +1188,16 @@ private struct NIOParkingLocationCard: View {
                 }
             }
 
-            // 内嵌苹果地图
-            Map(initialPosition: .region(region)) {
+            // 内嵌苹果地图（position 绑定，坐标更新时相机自动跟随）
+            Map(position: $cameraPosition) {
                 Marker("车辆停放位置", coordinate: coordinate)
                     .tint(.red)
             }
             .frame(height: 180)
             .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
             .allowsHitTesting(false)
+            .onChange(of: latitude) { followUpdatedPosition() }
+            .onChange(of: longitude) { followUpdatedPosition() }
 
             // 停放描述
             if let placemarkText {
@@ -1306,4 +1345,219 @@ private struct TyreTile: View {
 private struct InsightMetric: View {
     let value: String; let label: String
     var body: some View { VStack(spacing: 3) { Text(value).font(.title3.weight(.semibold)); Text(label).font(.caption2).foregroundStyle(.secondary) }.frame(maxWidth: .infinity) }
+}
+import SwiftUI
+
+// MARK: - 蓝牙钥匙管理卡片（virtual_key list_by_vehicle_v3 逆向接口）
+
+/// 蓝牙钥匙列表：展示钥匙类型/名称/状态/有效期；字段结构未完全逆向时回退原始 JSON 预览。
+/// 需要用户级 access_token（车级 token 会返回 no access found）。
+struct NIOBluetoothKeysCard: View {
+    @ObservedObject var service: NIOService
+
+    var body: some View {
+        NIOSectionCard(title: "蓝牙钥匙", subtitle: "virtual_key list_by_vehicle_v3 · 需用户级 Token") {
+            VStack(spacing: 0) {
+                if service.isLoadingVirtualKeys {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("正在拉取钥匙列表…").font(.caption).foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity).padding(.vertical, 10)
+                } else if let err = service.virtualKeysError {
+                    VStack(spacing: 6) {
+                        Text("⚠️ \(err)").font(.caption).foregroundStyle(.orange)
+                            .multilineTextAlignment(.center)
+                        Button("重试") { Task { await service.fetchVirtualKeys() } }
+                            .font(.caption)
+                        Text("车控/钥匙接口需要主 App 会话的用户级 access_token；小组件抓包的车级 token 无此权限")
+                            .font(.caption2).foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                    }
+                    .frame(maxWidth: .infinity).padding(.vertical, 8)
+                } else if service.virtualKeys.isEmpty {
+                    Button {
+                        Task { await service.fetchVirtualKeys() }
+                    } label: {
+                        Text("暂无数据，点击重新拉取").font(.caption).foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity).padding(.vertical, 10)
+                } else {
+                    ForEach(service.virtualKeys.indices, id: \.self) { idx in
+                        let key = service.virtualKeys[idx]
+                        keyRow(key)
+                        if idx < service.virtualKeys.count - 1 { Divider() }
+                    }
+                }
+            }
+        }
+        .task { if service.virtualKeys.isEmpty && service.virtualKeysError == nil { await service.fetchVirtualKeys() } }
+    }
+
+    private func keyRow(_ key: [String: Any]) -> some View {
+        let name = (key["key_name"] ?? key["name"] ?? key["nick_name"] ?? key["user_name"]) as? String
+        let type = (key["key_type"] ?? key["type"]) as? String
+        let status = (key["status"] ?? key["key_status"] ?? key["state"]) as? String
+        let expire = (key["expire_time"] ?? key["expired_time"] ?? key["valid_to"]) as? String
+            ?? ((key["expire_time"] as? Double).map { NIOFormatters.dateTime.string(from: Date(timeIntervalSince1970: $0)) })
+        let known = (name != nil) || (type != nil) || (status != nil)
+        return VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                Image(systemName: "key.horizontal.fill").foregroundStyle(.pink)
+                Text(name ?? "钥匙 #\(key["key_id"] as? String ?? key["id"] as? String ?? "?")")
+                    .font(.system(size: 13, weight: .semibold))
+                Spacer()
+                if let status {
+                    Text(status).font(.caption2.weight(.semibold))
+                        .padding(.horizontal, 6).padding(.vertical, 2)
+                        .background(Capsule().fill(Color.pink.opacity(0.12)))
+                }
+            }
+            if let type { Text("类型：\(type)").font(.caption).foregroundStyle(.secondary) }
+            if let expire { Text("有效期至：\(expire)").font(.caption).foregroundStyle(.secondary) }
+            if !known {
+                // 结构未识别 → 原始 JSON 兜底展示
+                if let data = try? JSONSerialization.data(withJSONObject: key, options: [.sortedKeys]),
+                   let s = String(data: data, encoding: .utf8) {
+                    Text(String(s.prefix(220)))
+                        .font(.system(size: 9, design: .monospaced))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(4)
+                }
+            }
+        }
+        .padding(.vertical, 8)
+    }
+}
+
+// MARK: - 车控面板（REST 异步命令通道逆向实现）
+//
+// 8 个常用指令网格；点击 → 二次确认 Alert（敏感指令标红警示）→ 发送 →
+// 服务端要求服务密码时自动弹出 PIN 输入框（RSA 加密提交 /api/1/poseidon/verify_pin）→ 重发指令。
+// 进度与结果通过 NIOService.publishTransientNotice 横幅展示。
+struct NIOVehicleControlPanel: View {
+    @ObservedObject var service: NIOService
+
+    @State private var pendingCommand: NIOVehicleLib.CommandEntry?
+    @State private var showConfirm = false
+    @State private var showPinAlert = false
+    @State private var pinInput = ""
+    @State private var isSending = false
+
+    var body: some View {
+        NIOSectionCard(title: "车控", subtitle: "逆向 REST 命令通道 · 谨慎使用") {
+            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
+                ForEach(NIOVehicleLib.vehicleCommandEntries, id: \.function) { cmd in
+                    Button {
+                        pendingCommand = cmd
+                        showConfirm = true
+                    } label: {
+                        VStack(spacing: 6) {
+                            Image(systemName: cmd.icon)
+                                .font(.system(size: 17, weight: .semibold))
+                            Text(cmd.title)
+                                .font(.caption2.weight(.medium))
+                        }
+                        .foregroundStyle(isSending ? Color.secondary : (cmd.sensitive ? Color.orange : Color.primary))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                        .background(Color.secondary.opacity(0.08))
+                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(NIOThemePaint.stroke, lineWidth: 1))
+                    }
+                    .disabled(isSending)
+                }
+            }
+            Text("解锁 / 开窗 / 尾门等敏感指令需要服务密码；寻车与大灯会实际影响车辆，请在车旁使用")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            // WebSocket 实时流（实验）：哨兵/召车/车控事件推送通道
+            Divider()
+            HStack(spacing: 10) {
+                Image(systemName: service.isCommandStreamConnected ? "dot.radiowaves.left.and.right" : "antenna.radiowave.left.and.right.slash")
+                    .foregroundStyle(service.isCommandStreamConnected ? Color.green : Color.secondary)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("命令实时流（实验）").font(.system(size: 12, weight: .bold))
+                    Text(service.isCommandStreamConnected
+                         ? "已连接 · 收到 \(service.commandStreamLog.count) 帧事件"
+                         : "wss 哨兵/召车事件通道，用于验证握手参数")
+                        .font(.system(size: 9)).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button(service.isCommandStreamConnected ? "断开" : "连接") {
+                    if service.isCommandStreamConnected {
+                        service.disconnectCommandStream()
+                    } else {
+                        service.connectCommandStream()
+                    }
+                }
+                .font(.system(size: 11, weight: .semibold))
+                .buttonStyle(.bordered)
+            }
+            if !service.commandStreamLog.isEmpty {
+                Text(service.commandStreamLog.suffix(3).joined(separator: "\n"))
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundStyle(.tertiary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .lineLimit(3)
+            }
+        }
+        .confirmationDialog(
+            "确认执行「\(pendingCommand?.title ?? "")」？",
+            isPresented: $showConfirm,
+            titleVisibility: .visible
+        ) {
+            Button("执行", role: pendingCommand?.sensitive == true ? .destructive : nil) {
+                Task { await execute(pendingCommand) }
+            }
+            Button("取消", role: .cancel) { }
+        } message: {
+            Text(pendingCommand?.sensitive == true
+                 ? "该指令会实际改变车辆状态，请确认车辆当前安全。"
+                 : "指令将通过蔚来官方命令通道发送。")
+        }
+        .alert("服务密码", isPresented: $showPinAlert) {
+            SecureField("服务密码", text: $pinInput)
+            Button("验证并执行") { Task { await submitPin() } }
+            Button("取消", role: .cancel) { pinInput = "" }
+        } message: {
+            Text("服务端要求验证服务密码（PIN），输入后将加密提交验证并重发指令")
+        }
+    }
+
+    @MainActor
+    private func execute(_ cmd: NIOVehicleLib.CommandEntry?) async {
+        guard let cmd else { return }
+        isSending = true
+        defer { isSending = false }
+        let result = await service.sendVehicleCommand(function: cmd.function, title: cmd.title)
+        handle(result: result, cmd: cmd)
+    }
+
+    @MainActor
+    private func submitPin() async {
+        let pin = pinInput
+        let cmd = pendingCommand
+        pinInput = ""
+        guard let cmd else { return }
+        isSending = true
+        defer { isSending = false }
+        let result = await service.verifyPinAndRetry(pin, function: cmd.function, title: cmd.title)
+        handle(result: result, cmd: cmd)
+    }
+
+    @MainActor
+    private func handle(result: NIOService.VehicleCommandResult, cmd: NIOVehicleLib.CommandEntry) {
+        switch result {
+        case .success(let msg):
+            service.publishTransientNotice(.success, "✅ \(msg)")
+        case .needPin:
+            service.publishTransientNotice(.info, "🔒 「\(cmd.title)」需要服务密码验证")
+            showPinAlert = true
+        case .failure(let msg):
+            service.publishTransientNotice(.warn, "⚠️ \(msg)")
+        }
+    }
 }

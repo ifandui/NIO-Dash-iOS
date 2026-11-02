@@ -31,12 +31,39 @@ struct WheaterVehicleSnapshotProvider: TimelineProvider {
 
     func getTimeline(in context: Context, completion: @escaping (Timeline<WheaterVehicleSnapshotEntry>) -> Void) {
         let snap = WheaterVehicleSnapshot.load()
-        let entry = WheaterVehicleSnapshotEntry(date: Date(), snapshot: snap)
-        // 充电时功率/充满倒计时变化快，缩短刷新间隔保证 Widget 数据跟手；平时 30 分钟省电
-        let intervalSeconds = (snap?.isCharging ?? false) ? 600 : 1800
-        let next = Calendar.current.date(byAdding: .second, value: intervalSeconds, to: Date())
-            ?? Date().addingTimeInterval(1800)
-        completion(Timeline(entries: [entry], policy: .after(next)))
+        let now = Date()
+        let entry = WheaterVehicleSnapshotEntry(date: now, snapshot: snap)
+
+        // 省电模式会大幅压缩 WidgetKit 刷新预算，导致小组件长时间停在旧数据。
+        // 充电时预生成一系列"预测电量"时间线条目（按功率线性内插到限充值），
+        // 即使系统迟迟不触发 reload，小组件也能随时间自动推进电量显示；
+        // 非充电时仅当前条目 + 30 分钟后重载。
+        var entries: [WheaterVehicleSnapshotEntry] = [entry]
+        var reloadInterval = 1800
+        if let s = snap, s.isCharging, let eta = s.chargeEtaDate, eta.timeIntervalSince(now) > 120,
+           let target = s.chargingTargetSoc, target > s.soc {
+            // 按 SOC 线性内插（功率推算已由主 App 完成，此处仅时间维度的平滑推进）
+            let totalSeconds = eta.timeIntervalSince(now)
+            let step: TimeInterval = min(600, max(300, totalSeconds / 8))
+            var t = step
+            while t < totalSeconds && entries.count < 12 {
+                let predicted = min(target, s.soc + (target - s.soc) * (t / totalSeconds))
+                var projected = s
+                projected.soc = (predicted * 10).rounded() / 10
+                entries.append(WheaterVehicleSnapshotEntry(date: now.addingTimeInterval(t), snapshot: projected))
+                t += step
+            }
+            // 终点条目：到达限充
+            var done = s
+            done.soc = target
+            entries.append(WheaterVehicleSnapshotEntry(date: eta, snapshot: done))
+            // 充电中刷新预算被压缩，仍尽量请求短间隔重载以跟进真实功率/ETA
+            reloadInterval = 600
+        }
+
+        let next = Calendar.current.date(byAdding: .second, value: reloadInterval, to: now)
+            ?? now.addingTimeInterval(1800)
+        completion(Timeline(entries: entries, policy: .after(next)))
     }
 }
 
@@ -177,6 +204,9 @@ struct NIOVehicleSmallView: View {
                     if snap.campModeActive { miniBadge("露营", color: .purple) }
                     if snap.powerHoldActive { miniBadge("不下电", color: .blue) }
                     if snap.v2lActive ?? false { miniBadge("放电", color: .yellow) }
+                    if snap.hiDryActive ?? false { miniBadge("干燥", color: .orange) }
+                    if snap.defrostActive ?? false { miniBadge("除霜", color: .cyan) }
+                    if snap.overheatProtectActive ?? false { miniBadge("过热保护", color: .red) }
                 }
                 .padding(.top, 2)
             }
@@ -255,7 +285,9 @@ struct NIOVehicleSmallView: View {
     }
 
     private var hasActiveMode: Bool {
-        snap.defenderActive || snap.petModeActive || snap.campModeActive || snap.powerHoldActive || (snap.v2lActive ?? false)
+        snap.defenderActive || snap.petModeActive || snap.campModeActive || snap.powerHoldActive
+            || (snap.v2lActive ?? false) || (snap.hiDryActive ?? false)
+            || (snap.defrostActive ?? false) || (snap.overheatProtectActive ?? false)
     }
 
     @ViewBuilder
@@ -521,13 +553,18 @@ struct NIOVehicleMediumView: View {
 
     @ViewBuilder
     private var modeBadges: some View {
-        if snap.defenderActive || snap.petModeActive || snap.campModeActive || snap.powerHoldActive || (snap.v2lActive ?? false) {
+        if snap.defenderActive || snap.petModeActive || snap.campModeActive || snap.powerHoldActive
+            || (snap.v2lActive ?? false) || (snap.hiDryActive ?? false)
+            || (snap.defrostActive ?? false) || (snap.overheatProtectActive ?? false) {
             HStack(spacing: 4) {
                 if snap.defenderActive { badge("守卫", "shield.fill", .pink) }
                 if snap.petModeActive { badge("宠物", "pawprint.fill", .orange) }
                 if snap.campModeActive { badge("露营", "tent.fill", .purple) }
                 if snap.powerHoldActive { badge("不下电", "bolt.badge.clock.fill", .blue) }
                 if snap.v2lActive ?? false { badge("放电", "powerplug.fill", .yellow) }
+                if snap.hiDryActive ?? false { badge("干燥", "heat.waves", .orange) }
+                if snap.defrostActive ?? false { badge("除霜", "windshield.front.defrost", .cyan) }
+                if snap.overheatProtectActive ?? false { badge("过热保护", "thermometer.sun.fill", .red) }
             }
         }
     }

@@ -36,3 +36,6 @@ __pycache__/
 # Reference projects (third-party, local only)
 ha-nio/
 NIO-Dash/
+
+# Local private secrets (NEVER commit)
+wheater/NIO_Secrets.plist

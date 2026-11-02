@@ -20,6 +20,9 @@ final class NIOCredentialReceiver: ObservableObject {
     @Published var lastReceivedAt: Date?
     @Published var receiveCount: Int = 0
     @Published var statusMessage: String = "未启动"
+    /// 最近一次推送的完整载荷（收件箱 UI 数据源，含凭证字段与抓包样本；持久化到 UserDefaults 支持重启恢复）
+    @Published var inboxPayload: [String: Any]?
+    static let inboxStoreKey = "nio_last_push_payload"
     /// 上次成功应用的完整凭证指纹（token+vehicleId+deviceId），用于去重：
     /// 相同凭证重复推送时静默忽略，不再震动/覆盖剪贴板/弹提示
     private var lastAppliedFingerprint: String = ""
@@ -34,6 +37,7 @@ final class NIOCredentialReceiver: ObservableObject {
     private static let pendingClipKey = "nio_pending_clip_credentials"
 
     private init() {
+        loadPersistedInbox()
         // 后台推送暂存的剪贴板凭证：回前台第一时间补写，保证"剪贴板读取并识别"可用
         NotificationCenter.default.addObserver(
             forName: UIApplication.willEnterForegroundNotification,
@@ -52,6 +56,33 @@ final class NIOCredentialReceiver: ObservableObject {
         UIPasteboard.general.string = pending
         UserDefaults.standard.removeObject(forKey: Self.pendingClipKey)
         statusMessage = "📋 已补写剪贴板（后台推送时暂存的凭证）"
+    }
+
+    // MARK: - 收件箱持久化（重启后仍可在收件箱查看/复制最近推送）
+
+    private func loadPersistedInbox() {
+        guard let str = UserDefaults.standard.string(forKey: Self.inboxStoreKey),
+              let data = str.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+        inboxPayload = json
+    }
+
+    /// 非隔离写入（网络接收线程调用）：UserDefaults 线程安全，@Published 回主线程更新
+    nonisolated private func persistInbox(_ json: [String: Any]) {
+        if let data = try? JSONSerialization.data(withJSONObject: json),
+           let str = String(data: data, encoding: .utf8) {
+            UserDefaults.standard.set(str, forKey: Self.inboxStoreKey)
+        }
+        Task { @MainActor [weak self] in
+            self?.inboxPayload = json
+        }
+    }
+
+    /// 清空收件箱（UI 手动操作）
+    func clearInbox() {
+        inboxPayload = nil
+        UserDefaults.standard.removeObject(forKey: Self.inboxStoreKey)
+        statusMessage = "🧹 收件箱已清空"
     }
 
     // MARK: - 启动接收服务器
@@ -222,13 +253,24 @@ final class NIOCredentialReceiver: ObservableObject {
         let userGuid   = Self.clean(json["user_guid"]     as? String ?? "")
         let appVer     = Self.clean(json["app_ver"]       as? String ?? "")
         let userAgent  = Self.clean(json["user_agent"]    as? String ?? "")
+        // 用户级 access_token（主 App 会话，车控/钥匙/RVS 必需，区别于小组件车级 token）
+        let userToken  = Self.clean(json["user_token"]    as? String ?? "")
+        // 车控指令抓包样本（官方 App 点车控时脚本捕获的完整请求原文）
+        let commandSamples = json["command_samples"] as? [[String: Any]] ?? []
+        // 车机扫码授权链路样本（poseidon：工程模式/扫码授权的服务端权限判定原文，含响应）
+        let poseidonSamples = json["poseidon_samples"] as? [[String: Any]] ?? []
+
+        // 收件箱存档（重启可查；无论凭证是否去重都更新，保证样本区始终最新）
+        persistInbox(json)
 
         Task { @MainActor [weak self] in
             self?.applyCredentials(
                 token: token, vehicleId: vehicleId,
                 deviceId: deviceId, vehicleUrl: !rvsUrl.isEmpty ? rvsUrl : vehicleUrl,
                 sign: sign, timestamp: timestamp,
-                userGuid: userGuid, appVer: appVer, userAgent: userAgent
+                userGuid: userGuid, appVer: appVer, userAgent: userAgent,
+                userToken: userToken, commandSamples: commandSamples,
+                poseidonSamples: poseidonSamples
             )
         }
     }
@@ -239,18 +281,22 @@ final class NIOCredentialReceiver: ObservableObject {
     private func applyCredentials(token: String, vehicleId: String,
                                   deviceId: String, vehicleUrl: String,
                                   sign: String, timestamp: String = "",
-                                  userGuid: String = "", appVer: String = "", userAgent: String = "") {
+                                  userGuid: String = "", appVer: String = "", userAgent: String = "",
+                                  userToken: String = "", commandSamples: [[String: Any]] = [],
+                                  poseidonSamples: [[String: Any]] = []) {
         let service = NIOService.shared
         var applied: [String] = []
         // 设备标识：device_id 优先，User-Guid 兜底（网关请求无 query device_id）
         let effectiveDeviceId = deviceId.isEmpty ? userGuid : deviceId
 
-        // 去重：核心三要素（token+vehicleId+deviceId）与上次完全相同 → 静默忽略。
+        // 去重：核心要素（token+vehicleId+deviceId+用户级token+车控样本摘要）与上次完全相同 → 静默忽略。
         // 重复推送不再震动、不覆盖剪贴板、不弹横幅，只轻量记录时间。
         // 例外：当前 Token 已被判定失效（401/403）时不能静默——重推相同凭证说明
         // 用户在尝试恢复，需明确警示"凭证未变化但已失效"，并强制重验一次；
         // 服务端仍返回 403 则保持红色警示，已恢复则横幅自动复位。
-        let fingerprint = "\(token)|\(vehicleId)|\(effectiveDeviceId)"
+        let samplesDigest = commandSamples.prefix(5).map { "\($0["url"] ?? "")|\($0["body"] ?? "")" }.joined(separator: ";")
+        let poseidonDigest = poseidonSamples.prefix(5).map { "\($0["url"] ?? "")|\($0["status"] ?? "")|\(($0["resp_body"] as? String ?? "").prefix(120))" }.joined(separator: ";")
+        let fingerprint = "\(token)|\(vehicleId)|\(effectiveDeviceId)|\(userToken)|\(samplesDigest)|\(poseidonDigest)"
         if fingerprint == lastAppliedFingerprint {
             lastReceivedAt = Date()
             if service.is403Detected {
@@ -268,6 +314,45 @@ final class NIOCredentialReceiver: ObservableObject {
         }
 
         if !token.isEmpty     { service.nioVehicleAccessToken = token;  applied.append("Token") }
+        // 用户级 token：单独存档，车控/钥匙/实时流优先使用（不覆盖车级 token，保证 widget/info 查询路径不受影响）
+        if !userToken.isEmpty {
+            service.nioUserAccessToken = userToken
+            applied.append("用户级Token🎯")
+        }
+        // 车控指令抓包样本 → 诊断日志（逆向对照官方请求格式：端点/body/签名参与方式）
+        for sample in commandSamples.prefix(5) {
+            let fn = (sample["function"] as? String) ?? ""
+            let url = (sample["url"] as? String) ?? ""
+            let method = (sample["method"] as? String) ?? "POST"
+            let body = (sample["body"] as? String) ?? ""
+            let time = (sample["time"] as? String) ?? ""
+            service.appendLog(NIOFetchLogEntry(
+                category: "command_capture", level: "info",
+                message: "🎯 官方车控样本\(fn.isEmpty ? "" : "·\(fn)") \(time)",
+                detail: "\(method) \(url)\nbody=\(body)",
+                timestamp: Date(), requestURL: url, requestMethod: method,
+                requestBody: body, responsePreview: nil, statusCode: nil
+            ))
+        }
+        if !commandSamples.isEmpty { applied.append("车控样本×\(commandSamples.count)") }
+        // 车机扫码授权链路样本 → 诊断日志（含服务端响应原文：权限判定/错误码/暂无权限出处）
+        for sample in poseidonSamples.prefix(5) {
+            let url = (sample["url"] as? String) ?? ""
+            let method = (sample["method"] as? String) ?? "GET"
+            let reqBody = (sample["req_body"] as? String) ?? ""
+            let status = sample["status"] as? Int ?? 0
+            let respBody = (sample["resp_body"] as? String) ?? ""
+            let time = (sample["time"] as? String) ?? ""
+            let pathTail = URL(string: url)?.pathComponents.suffix(2).joined(separator: "/") ?? url
+            service.appendLog(NIOFetchLogEntry(
+                category: "scan_capture", level: "info",
+                message: "🔬 扫码授权链路样本·\(pathTail) \(time)",
+                detail: "\(method) \(url)\nreq=\(reqBody)\nstatus=\(status)\nresp=\(respBody)",
+                timestamp: Date(), requestURL: url, requestMethod: method,
+                requestBody: reqBody, responsePreview: String(respBody.prefix(800)), statusCode: status
+            ))
+        }
+        if !poseidonSamples.isEmpty { applied.append("扫码链路×\(poseidonSamples.count)") }
         if !vehicleId.isEmpty { service.nioVehicleId         = vehicleId; applied.append("VehicleID") }
         if !effectiveDeviceId.isEmpty { service.nioDeviceId = effectiveDeviceId; applied.append("DeviceID") }
         if !sign.isEmpty      { service.nioVehicleApiSign    = sign }
@@ -302,13 +387,15 @@ final class NIOCredentialReceiver: ObservableObject {
         // 保证设置页"剪贴板读取并识别"始终能读到最新凭证。
         var clipDict: [String: String] = [:]
         if !token.isEmpty     { clipDict["vehicle_token"] = token }
+        if !userToken.isEmpty { clipDict["user_token"]    = userToken }
         if !vehicleId.isEmpty { clipDict["vehicle_id"]    = vehicleId }
         if !effectiveDeviceId.isEmpty { clipDict["device_id"] = effectiveDeviceId }
         if !vehicleUrl.isEmpty { clipDict["vehicle_url"]  = vehicleUrl }
         if !sign.isEmpty      { clipDict["sign"]          = sign }
         if !appVer.isEmpty    { clipDict["app_ver"]       = appVer }
         if !userGuid.isEmpty  { clipDict["user_guid"]     = userGuid }
-        if let clipData = try? JSONSerialization.data(withJSONObject: clipDict, options: [.prettyPrinted, .sortedKeys]),
+        if !clipDict.isEmpty,
+           let clipData = try? JSONSerialization.data(withJSONObject: clipDict, options: [.prettyPrinted, .sortedKeys]),
            let clipStr = String(data: clipData, encoding: .utf8) {
             if UIApplication.shared.applicationState == .active {
                 UIPasteboard.general.string = clipStr
@@ -331,8 +418,11 @@ final class NIOCredentialReceiver: ObservableObject {
             UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
         )
 
-        // 广播刷新
+        // 应用内横幅（修复：此前直推回填走 refreshAll 静默路径导致横幅从不出现）
+        service.publishTransientNotice(.success, "🌸 凭证已回填: \(summary)")
+
+        // 广播刷新（announce=true 让本次拉取结果也弹横幅反馈）
         NotificationCenter.default.post(name: NSNotification.Name("NIO_SNIFF_SUCCESS"), object: nil)
-        service.refreshAll(force: true)
+        service.refreshAll(force: true, announce: true)
     }
 }

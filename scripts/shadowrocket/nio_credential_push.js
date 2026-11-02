@@ -41,6 +41,25 @@ const DEFAULT_CHECKIN_URL = "https://gateway-front-external.nio.com/moat/10086/n
     const qp = parseQS(url);
     const appVer = qp.app_ver || (url.match(/app_ver=([\d.]+)/) || [])[1] || "";
 
+    // ── v3：主 App 用户级 token + 官方车控指令原文捕获 ──
+    const isMainAppUA = userAgent.includes("WeiLaiApp") && !userAgent.includes("WidgetExtension");
+    const isCommandReq = url.includes("/api/1/vehicle/command/") ||
+                         url.includes("/api/2/ws/command/connect") ||
+                         url.includes("/api/1/sec/iot/platform/thing/commands");
+
+    let commandSamples = [];
+    try { commandSamples = JSON.parse($persistentStore.read("nio_command_samples") || "[]"); } catch (_) {}
+    if (isCommandReq) {
+        const sample = {
+            time:   new Date().toLocaleTimeString("zh-CN", { hour12: false }),
+            method: ($request.method || "POST").toUpperCase(),
+            url:    url,
+            body:   typeof $request.body === "string" ? $request.body : ($request.body ? JSON.stringify($request.body) : "")
+        };
+        commandSamples = [sample].concat(commandSamples).slice(0, 5);
+        $persistentStore.write(JSON.stringify(commandSamples), "nio_command_samples");
+    }
+
     // ── 无有效凭证则跳过 ──
     if (!token && !qp.vehicle_id) { $done({}); return; }
 
@@ -49,6 +68,7 @@ const DEFAULT_CHECKIN_URL = "https://gateway-front-external.nio.com/moat/10086/n
     try { store = JSON.parse($persistentStore.read(STORE_KEY) || "{}"); } catch (_) {}
 
     if (token)         store.vehicle_token = token;
+    if (token && isMainAppUA) store.user_token = token; // 主 App 会话 = 用户级 token（车控/钥匙/RVS 权限）
     if (qp.vehicle_id) store.vehicle_id    = qp.vehicle_id;
     if (qp.device_id)  store.device_id     = qp.device_id;
     else if (!store.device_id && userGuid) store.device_id = userGuid; // 网关请求无 query device_id，请求头 User-Guid 兜底
@@ -91,6 +111,8 @@ const DEFAULT_CHECKIN_URL = "https://gateway-front-external.nio.com/moat/10086/n
         timestamp:     store.timestamp     || qp.timestamp || "",
         app_ver:       store.app_ver       || appVer || "",
         user_agent:    store.user_agent    || userAgent || "",
+        user_token:    store.user_token    || "",
+        command_samples: commandSamples,
         source:        "shadowrocket_module"
     });
 
@@ -104,9 +126,14 @@ const DEFAULT_CHECKIN_URL = "https://gateway-front-external.nio.com/moat/10086/n
     // ── Shadowrocket 系统通知 ──
     try {
         if (typeof $notification !== "undefined") {
-            const title = isRvs ? "🎉 蔚来完整遥测 (胎压/FOTA) 已捕获！" : "🔑 Token 已捕获";
-            const body  = isRvs ? "含 4 轮胎压与车机固件，App 自动回填中" : "请在蔚来 App 爱车页下拉刷新获取全量胎压与 FOTA";
-            $notification.post(title, body, "");
+            if (isCommandReq) {
+                const m = (commandSamples[0] && commandSamples[0].body || "").match(/"function"\s*:\s*"([^"]+)"/);
+                $notification.post("🎯 已捕获官方车控原文" + (m ? "·" + m[1] : ""), "已直推 App 诊断（command_capture）", "");
+            } else {
+                const title = isRvs ? "🎉 蔚来完整遥测 (胎压/FOTA) 已捕获！" : "🔑 Token 已捕获";
+                const body  = isRvs ? "含 4 轮胎压与车机固件，App 自动回填中" : "请在蔚来 App 爱车页下拉刷新获取全量胎压与 FOTA";
+                $notification.post(title, body, "");
+            }
         }
     } catch (_) {}
 

@@ -9,6 +9,8 @@
 /* Begin PBXBuildFile section */
 		2B2BB25428BFB36300A8B2A3 /* wheaterApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B2BB25328BFB36300A8B2A3 /* wheaterApp.swift */; };
 		2B2BB25628BFB36300A8B2A3 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B2BB25528BFB36300A8B2A3 /* ContentView.swift */; };
+		AA7000012D20000000EED680 /* NIOCredentialInboxView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA7100012D20000000EED680 /* NIO/NIOCredentialInboxView.swift */; };
+		AA7000022D20000000EED680 /* NIO_Secrets.plist in Resources */ = {isa = PBXBuildFile; fileRef = AA7100022D20000000EED680 /* NIO_Secrets.plist */; };
 		2B2BB25828BFB36600A8B2A3 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 2B2BB25728BFB36600A8B2A3 /* Assets.xcassets */; };
 		2B2BB25B28BFB36600A8B2A3 /* Preview Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 2B2BB25A28BFB36600A8B2A3 /* Preview Assets.xcassets */; };
 		2B902BED28D91FFF003FB942 /* WidgetKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 2B902BEC28D91FFF003FB942 /* WidgetKit.framework */; };
@@ -73,6 +75,8 @@
 		2B2BB25728BFB36600A8B2A3 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		2B2BB25A28BFB36600A8B2A3 /* Preview Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Preview Assets.xcassets"; sourceTree = "<group>"; };
 		2B7631FB28C412DA00AE686C /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		AA7100012D20000000EED680 /* NIO/NIOCredentialInboxView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NIO/NIOCredentialInboxView.swift; sourceTree = "<group>"; };
+		AA7100022D20000000EED680 /* NIO_Secrets.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = NIO_Secrets.plist; sourceTree = "<group>"; };
 		2B902BEA28D91FFF003FB942 /* WheaterStatusExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = WheaterStatusExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		2B902BEC28D91FFF003FB942 /* WidgetKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = WidgetKit.framework; path = System/Library/Frameworks/WidgetKit.framework; sourceTree = SDKROOT; };
 		2B902BEE28D91FFF003FB942 /* SwiftUI.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SwiftUI.framework; path = System/Library/Frameworks/SwiftUI.framework; sourceTree = SDKROOT; };
@@ -153,6 +157,7 @@
 				2B2BB25328BFB36300A8B2A3 /* wheaterApp.swift */,
 				2B2BB25928BFB36600A8B2A3 /* Preview Content */,
 				2B7631FB28C412DA00AE686C /* Info.plist */,
+				AA7100022D20000000EED680 /* NIO_Secrets.plist */,
 			);
 			path = wheater;
 			sourceTree = "<group>";
@@ -190,6 +195,7 @@
 				AA1000162C3E846500EED680 /* NIO/NIOMinimalBootView.swift */,
 				AA1000172C3E846500EED680 /* NIO/NIODashboardCards.swift */,
 				AA5600042D0E5A0000EED680 /* NIO/NIOCarPlayScene.swift */,
+				AA7100012D20000000EED680 /* NIO/NIOCredentialInboxView.swift */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -305,6 +311,7 @@
 			files = (
 				2B2BB25B28BFB36600A8B2A3 /* Preview Assets.xcassets in Resources */,
 				2B2BB25828BFB36600A8B2A3 /* Assets.xcassets in Resources */,
+				AA7000022D20000000EED680 /* NIO_Secrets.plist in Resources */,
 			);
 		};
 		2B902BE828D91FFF003FB942 /* Resources */ = {
@@ -343,6 +350,7 @@
 				AA5600012D0E5A0000EED680 /* IslandControlWidget.swift in Sources */,
 				AA5600082D0E5A0000EED680 /* NIOVehicleSnapshot.swift in Sources */,
 				AA5600022D0E5A0000EED680 /* NIOCarPlayScene.swift in Sources */,
+				AA7000012D20000000EED680 /* NIOCredentialInboxView.swift in Sources */,
 			);
 		};
 		2B902BE628D91FFF003FB942 /* Sources */ = {
@@ -490,7 +498,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 2808;
+				CURRENT_PROJECT_VERSION = 2809;
 				DEVELOPMENT_ASSET_PATHS = "\"wheater/Preview Content\"";
 				DEVELOPMENT_TEAM = E3AH4URHDH;
 				ENABLE_DEBUG_DYLIB = NO;
@@ -509,7 +517,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 5.1.7;
+				MARKETING_VERSION = 5.2.0;
 				CODE_SIGN_ENTITLEMENTS = wheater/wheater.entitlements;
 				PRODUCT_BUNDLE_IDENTIFIER = com.YumikoToysRR.wheater;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -526,7 +534,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 2808;
+				CURRENT_PROJECT_VERSION = 2809;
 				DEVELOPMENT_ASSET_PATHS = "\"wheater/Preview Content\"";
 				DEVELOPMENT_TEAM = E3AH4URHDH;
 				ENABLE_DEBUG_DYLIB = NO;
@@ -545,7 +553,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 5.1.7;
+				MARKETING_VERSION = 5.2.0;
 				CODE_SIGN_ENTITLEMENTS = wheater/wheater.entitlements;
 				PRODUCT_BUNDLE_IDENTIFIER = com.YumikoToysRR.wheater;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -562,7 +570,7 @@
 				ASSETCATALOG_COMPILER_WIDGET_BACKGROUND_COLOR_NAME = WidgetBackground;
 				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 2808;
+				CURRENT_PROJECT_VERSION = 2809;
 				DEVELOPMENT_TEAM = E3AH4URHDH;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = WheaterStatus/Info.plist;
@@ -574,7 +582,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 5.1.7;
+				MARKETING_VERSION = 5.2.0;
 				CODE_SIGN_ENTITLEMENTS = WheaterStatus/Extension.entitlements;
 				PRODUCT_BUNDLE_IDENTIFIER = com.YumikoToysRR.wheater.WheaterStatus;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -593,7 +601,7 @@
 				ASSETCATALOG_COMPILER_WIDGET_BACKGROUND_COLOR_NAME = WidgetBackground;
 				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 2808;
+				CURRENT_PROJECT_VERSION = 2809;
 				DEVELOPMENT_TEAM = E3AH4URHDH;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = WheaterStatus/Info.plist;
@@ -605,7 +613,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 5.1.7;
+				MARKETING_VERSION = 5.2.0;
 				CODE_SIGN_ENTITLEMENTS = WheaterStatus/Extension.entitlements;
 				PRODUCT_BUNDLE_IDENTIFIER = com.YumikoToysRR.wheater.WheaterStatus;
 				PRODUCT_NAME = "$(TARGET_NAME)";

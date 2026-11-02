@@ -28,6 +28,9 @@ struct WheaterVehicleSnapshot: Codable {
     var campModeActive: Bool
     var powerHoldActive: Bool
     var v2lActive: Bool?
+    var hiDryActive: Bool?
+    var defrostActive: Bool?
+    var overheatProtectActive: Bool?
     var chargingTargetSoc: Double?
     var chargeEtaDate: Date?
     var lvBattSoc: Int?
@@ -68,6 +71,9 @@ struct WheaterVehicleSnapshot: Codable {
             campModeActive: state.campModeActive,
             powerHoldActive: state.powerHoldActive,
             v2lActive: state.v2lActive,
+            hiDryActive: state.hiDryActive,
+            defrostActive: state.defrostActive,
+            overheatProtectActive: state.overheatProtectActive,
             chargingTargetSoc: state.chargingTargetSoc,
             chargeEtaDate: state.chargeEtaDate,
             lvBattSoc: state.lvBattSoc,
@@ -104,7 +110,8 @@ struct WheaterVehicleSnapshot: Codable {
             isDriving: false, isLocked: true, anyDoorOpen: false,
             insideTemp: 22.5, outsideTemp: 16.0,
             defenderActive: false, petModeActive: false, campModeActive: false,
-            powerHoldActive: false, v2lActive: false, chargingTargetSoc: 90,
+            powerHoldActive: false, v2lActive: false, hiDryActive: false,
+            defrostActive: false, overheatProtectActive: false, chargingTargetSoc: 90,
             chargeEtaDate: Date().addingTimeInterval(42 * 60),
             lvBattSoc: 96, lvBattVolt: 12.8, vehicleVersion: nil,
             preferActualRange: false,

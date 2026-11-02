@@ -523,6 +523,9 @@ struct NIOExteriorStatus: Codable {
             speed = d
         } else if let i = try? c.decodeIfPresent(Int.self, forKey: .speed) {
             speed = Double(i)
+        } else if let s = try? c.decodeIfPresent(String.self, forKey: .speed), let v = Double(s), v.isFinite {
+            // 行驶中部分数据源将 speed 下发为字符串，缺该兜底会导致车速不显示
+            speed = v
         }
     }
 

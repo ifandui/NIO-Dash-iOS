@@ -60,10 +60,10 @@ final class NIOService: ObservableObject {
     @Published var nioDeviceId: String = UserDefaults.standard.string(forKey: "nio_device_id") ?? "" {
         didSet { UserDefaults.standard.set(nioDeviceId, forKey: "nio_device_id") }
     }
-    @Published var nioVehicleSignSecret: String = UserDefaults.standard.string(forKey: "nio_vehicle_sign_secret") ?? "" {
+    @Published var nioVehicleSignSecret: String = UserDefaults.standard.string(forKey: "nio_vehicle_sign_secret") ?? NIOVehicleLib.builtinSignSecret {
         didSet { UserDefaults.standard.set(nioVehicleSignSecret, forKey: "nio_vehicle_sign_secret") }
     }
-    @Published var nioVehicleSignAlgo: String = UserDefaults.standard.string(forKey: "nio_vehicle_sign_algo") ?? "md5_append" {
+    @Published var nioVehicleSignAlgo: String = UserDefaults.standard.string(forKey: "nio_vehicle_sign_algo") ?? "md5_full" {
         didSet { UserDefaults.standard.set(nioVehicleSignAlgo, forKey: "nio_vehicle_sign_algo") }
     }
     @Published var nioVehicleApiSign: String = UserDefaults.standard.string(forKey: "nio_vehicle_sign") ?? "" {
@@ -73,7 +73,22 @@ final class NIOService: ObservableObject {
         didSet { UserDefaults.standard.set(nioVehicleApiTimestamp, forKey: "nio_vehicle_timestamp") }
     }
     @Published var nioVehicleAccessToken: String = UserDefaults.standard.string(forKey: "nio_vehicle_token") ?? "" {
-        didSet { UserDefaults.standard.set(nioVehicleAccessToken, forKey: "nio_vehicle_token") }
+        didSet {
+            UserDefaults.standard.set(nioVehicleAccessToken, forKey: "nio_vehicle_token")
+            // Token 实质变更时记录录入时间（蔚来 access_token 有效期 30 天，用于倒计时提醒）
+            let normalized = normalizeBearer(nioVehicleAccessToken)
+            let previous = normalizeBearer(oldValue)
+            if normalized != previous {
+                if normalized.isEmpty {
+                    UserDefaults.standard.removeObject(forKey: "nio_token_created_at")
+                } else {
+                    UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "nio_token_created_at")
+                }
+            }
+        }
+    }
+    @Published var nioUserAccessToken: String = UserDefaults.standard.string(forKey: "nio_user_access_token") ?? "" {
+        didSet { UserDefaults.standard.set(nioUserAccessToken, forKey: "nio_user_access_token") }
     }
     @Published var nioChangeApiURL: String = UserDefaults.standard.string(forKey: "nio_change_api_url") ?? "" {
         didSet { UserDefaults.standard.set(nioChangeApiURL, forKey: "nio_change_api_url") }
@@ -92,6 +107,24 @@ final class NIOService: ObservableObject {
     }
     @Published var nioVehiclePollIntervalSeconds: Int = max(60, UserDefaults.standard.integer(forKey: "nio_poll_interval") > 0 ? UserDefaults.standard.integer(forKey: "nio_poll_interval") : 300) {
         didSet { UserDefaults.standard.set(nioVehiclePollIntervalSeconds, forKey: "nio_poll_interval") }
+    }
+
+    // MARK: - Token 生命周期（逆向实测：登录响应 expires_in=2592000 秒 = 30 天，服务端无 refresh 端点，过期需重抓）
+
+    /// 蔚来 access_token 有效期（秒）：30 天
+    static let nioTokenLifetimeSeconds: TimeInterval = 30 * 24 * 3600
+
+    /// Token 预计到期时间（依据本机录入时间推算；无法得知服务端真实签发时刻，误差 ≤ 录入间隔）
+    var nioTokenExpiryDate: Date? {
+        guard !normalizeBearer(nioVehicleAccessToken).isEmpty,
+              let created = UserDefaults.standard.object(forKey: "nio_token_created_at") as? TimeInterval else { return nil }
+        return Date(timeIntervalSince1970: created + Self.nioTokenLifetimeSeconds)
+    }
+
+    /// Token 剩余天数（向上取整，最低 0）
+    var nioTokenDaysRemaining: Int? {
+        guard let expiry = nioTokenExpiryDate else { return nil }
+        return max(0, Int(ceil(expiry.timeIntervalSinceNow / 86400)))
     }
 
     // MARK: - Published 业务状态
@@ -231,6 +264,9 @@ final class NIOService: ObservableObject {
     /// (tyre, FOTA, doors…) are only refreshed when stale, explicitly requested,
     /// or still absent; this avoids repeatedly hitting the private telemetry API.
     private var lastTelemetryFetch: Date? = nil
+    // RVS 遥测冷却：车级 vehicle_token 对 RVS 接口必然 auth_failed（app_id not login），
+    // 失败后 30 分钟内跳过 RVS 路白发请求；widget/info（车级 token 的正确接口）独立承担数据。
+    private var rvsBlockedUntil: Date? = nil
     private let telemetryRefreshInterval: TimeInterval = 15 * 60
 
     private init() {
@@ -403,8 +439,15 @@ final class NIOService: ObservableObject {
         // Each request is replayed unchanged because its `field` list is signed.
         let hasMissingTelemetry = !NIOVehicleLib.extractTyreInfo(self.vehicleData?.data?.status?.tyreStatus).hasData
             || (self.vehicleData?.data?.status?.fotaStatus?.currentVersion?.isEmpty != false)
-        let shouldRefreshTelemetry = force || hasMissingTelemetry
-            || lastTelemetryFetch.map { Date().timeIntervalSince($0) >= telemetryRefreshInterval } ?? true
+        // Android 身份下 widget 高频路被跳过，RVS 成为唯一数据源——节流间隔跟随用户轮询间隔，
+        // 避免沿用 iOS 双路时代的 15 分钟全量节流导致电量等动态数据滞后。
+        let telemetryInterval: TimeInterval = nioVehicleSignAlgo == "md5_full"
+            ? TimeInterval(max(60, nioVehiclePollIntervalSeconds))
+            : telemetryRefreshInterval
+        var shouldRefreshTelemetry = force || hasMissingTelemetry
+            || lastTelemetryFetch.map { Date().timeIntervalSince($0) >= telemetryInterval } ?? true
+        // RVS 冷却窗口内跳过（车级 token 必败场景，详见 rvsBlockedUntil 注释）
+        if Date() < (rvsBlockedUntil ?? .distantPast) { shouldRefreshTelemetry = false }
         var rvsStatus: NIOVehicleStatus? = nil
         if shouldRefreshTelemetry {
             let rvsStatuses = await withTaskGroup(of: NIOVehicleStatus?.self) { group in
@@ -465,13 +508,20 @@ final class NIOService: ObservableObject {
     }
 
     private func buildWidgetTargetURL() -> URL? {
+        // md5_full（Android/iOS 通用逆向算法）实测打通 widget/info：
+        // app_id=10001 + 车级 vehicle_token + md5(GET+path+?+canon+secret+Bearer头值) → 200 全量车况。
+        // 旧算法（md5_append 等）沿用 iOS 抓包语境：app_id=10002 + iOS secret。
+        let algo = nioVehicleSignAlgo.isEmpty ? "md5_append" : nioVehicleSignAlgo
+        let isFullAlgo = algo == "md5_full"
         if !nioVehicleId.isEmpty {
             let devId = nioDeviceId.isEmpty ? "iOS_Device_\(nioVehicleId.prefix(6))" : nioDeviceId
             if let built = NIOVehicleLib.buildWidgetURL(
                 vehicleId: nioVehicleId,
                 deviceId: devId,
-                secret: nioVehicleSignSecret.isEmpty ? nil : nioVehicleSignSecret,
-                algo: nioVehicleSignAlgo.isEmpty ? "md5_append" : nioVehicleSignAlgo
+                secret: nioVehicleSignSecret.isEmpty ? NIOVehicleLib.builtinSignSecret : nioVehicleSignSecret,
+                algo: algo,
+                appId: isFullAlgo ? "10001" : "10002",
+                authorization: isFullAlgo ? normalizeBearer(nioVehicleAccessToken) : nil
             ) {
                 return built.url
             }
@@ -482,7 +532,13 @@ final class NIOService: ObservableObject {
                 let devId = NIOVehicleLib.extractQueryParam(from: nioVehicleApiURL, key: "device_id") ?? "iOS_Device_\(vid.prefix(6))"
                 let sgn = NIOVehicleLib.extractQueryParam(from: nioVehicleApiURL, key: "sign")
                 let ts = NIOVehicleLib.extractQueryParam(from: nioVehicleApiURL, key: "timestamp") ?? "\(Int(Date().timeIntervalSince1970))"
-                if let built = NIOVehicleLib.buildWidgetURL(vehicleId: vid, deviceId: devId, secret: nioVehicleSignSecret.isEmpty ? nil : nioVehicleSignSecret, algo: nioVehicleSignAlgo) {
+                if let built = NIOVehicleLib.buildWidgetURL(
+                    vehicleId: vid, deviceId: devId,
+                    secret: nioVehicleSignSecret.isEmpty ? NIOVehicleLib.builtinSignSecret : nioVehicleSignSecret,
+                    algo: algo,
+                    appId: isFullAlgo ? "10001" : "10002",
+                    authorization: isFullAlgo ? normalizeBearer(nioVehicleAccessToken) : nil
+                ) {
                     return built.url
                 }
                 if let sgn = sgn, !sgn.isEmpty {
@@ -513,7 +569,11 @@ final class NIOService: ObservableObject {
             if !trimmed.lowercased().hasPrefix("http://") && !trimmed.lowercased().hasPrefix("https://") {
                 fullUrl = "https://\(trimmed)"
             }
-            if let resigned = NIOVehicleLib.autoResignRvsURL(fullUrl, secret: nioVehicleSignSecret, algo: nioVehicleSignAlgo),
+            if let resigned = NIOVehicleLib.autoResignRvsURL(
+                    fullUrl,
+                    secret: nioVehicleSignSecret,
+                    algo: nioVehicleSignAlgo,
+                    authorization: normalizeBearer(nioVehicleAccessToken)),
                let u = URL(string: resigned) {
                 urls.append(u)
             }
@@ -524,11 +584,11 @@ final class NIOService: ObservableObject {
 
         // 2. 基于 vehicleId 动态构建 RVS 遥测候选 URL
         if !vid.isEmpty {
+            // 仅保留实测存活的两个 RVS 基座（签名通过、返回 auth_failed 层错误）：
+            // app.nio.com/.../v2/vehicle 与 gateway-front-external/moat 已实测 404（路径不存在），剔除。
             let baseCandidates = [
                 "https://icar.nio.com/api/2/rvs/vehicle/\(vid)/status",
-                "https://icar.nio.com/api/1/vehicle/\(vid)/status",
-                "https://gateway-front-external.nio.com/moat/1100367/api/v1/otd/car/ext/general/vehicle/\(vid)/status",
-                "https://app.nio.com/app/api/icar/v2/vehicle/\(vid)/status"
+                "https://icar.nio.com/api/1/vehicle/\(vid)/status"
             ]
 
             for base in baseCandidates {
@@ -536,11 +596,25 @@ final class NIOService: ObservableObject {
                     "region": "cn",
                     "lang": "zh-CN",
                     "app_ver": "6.5.3",
+                    "app_id": NIOVehicleLib.androidAppID,
                     "device_id": devId,
                     "timestamp": ts
                 ]
-                if !nioVehicleSignSecret.isEmpty {
-                    params["sign"] = NIOVehicleLib.computeWidgetSign(params: params, secret: nioVehicleSignSecret, algo: nioVehicleSignAlgo)
+                // 空值回落内置 Android 密钥：用户清空字段也不退化为无签名请求
+                let effectiveSecret = nioVehicleSignSecret.isEmpty ? NIOVehicleLib.builtinSignSecret : nioVehicleSignSecret
+                if !effectiveSecret.isEmpty {
+                    if nioVehicleSignAlgo == "md5_full",
+                       let basePath = URL(string: base)?.path {
+                        // Android 客户端真实算法：METHOD+path 参与签名，Authorization 完整头值作尾串
+                        params["sign"] = NIOVehicleLib.computeAndroidSign(
+                            method: "GET",
+                            path: basePath,
+                            params: params,
+                            secret: effectiveSecret,
+                            authorization: normalizeBearer(nioVehicleAccessToken))
+                    } else {
+                        params["sign"] = NIOVehicleLib.computeWidgetSign(params: params, secret: effectiveSecret, algo: nioVehicleSignAlgo)
+                    }
                 } else if !nioVehicleApiSign.isEmpty {
                     params["sign"] = nioVehicleApiSign
                 }
@@ -588,6 +662,13 @@ final class NIOService: ObservableObject {
 
         if blob.contains("sign") || blob.contains("timestamp") || blob.contains("签名") || blob.contains("时间戳") {
             lastError = "接口签名/时间戳校验被拒（HTTP \(statusCode)）· Token 仍有效，补抓 sign_secret 后自动恢复\(detail)"
+            return
+        }
+        // "app_id not login <uid>"：Token 可被服务端解析（已还原 user），但该 Token 的类型与会话
+        // 绑定不匹配当前接口——车级 vehicle_token（小组件体系）对 RVS 遥测接口必然报此错，
+        // 只有用户级 access_token（App 登录会话）能调 RVS；widget/info 两类均可。
+        if blob.contains("app_id not login") || blob.contains("no access found") {
+            lastError = "Token 与接口不匹配（HTTP \(statusCode)）· 车级 vehicle_token 仅支持 widget/info 接口，RVS 遥测需用户级 access_token · 当前已自动切换 widget/info 数据源\(detail)"
             return
         }
         if blob.contains("<html") || blob.contains("<!doctype") {
@@ -724,6 +805,10 @@ final class NIOService: ObservableObject {
             } else {
                 updateLog(logEntry, statusCode: http.statusCode, preview: String(text.prefix(200)))
                 noteAuthFailure(http.statusCode, body: text)
+                // RVS 鉴权失败 → 进入冷却，避免后续轮询反复白发请求
+                if text.contains("app_id not login") || text.contains("no access found") {
+                    rvsBlockedUntil = Date().addingTimeInterval(30 * 60)
+                }
             }
         } catch {
             updateLog(logEntry, statusCode: nil, preview: error.localizedDescription)
@@ -1064,6 +1149,10 @@ final class NIOService: ObservableObject {
             self.nioVehicleAccessToken = t
             updated = true
         }
+        if let ut = parsed.userToken, !ut.isEmpty {
+            self.nioUserAccessToken = ut
+            updated = true
+        }
         if let cu = parsed.changeURL, !cu.isEmpty {
             self.nioChangeApiURL = cu
         }
@@ -1137,7 +1226,7 @@ final class NIOService: ObservableObject {
         saveJSONAsync(orders, to: ordersFile)
     }
 
-    private func appendLog(_ entry: NIOFetchLogEntry) {
+    func appendLog(_ entry: NIOFetchLogEntry) {
         var logs = fetchLogs
         logs.insert(entry, at: 0)
         if logs.count > 50 { logs = Array(logs.prefix(50)) }
@@ -1329,6 +1418,162 @@ final class NIOService: ObservableObject {
         }
     }
 
+    /// 车控/钥匙/实时流用 token：用户级 access_token（主 App 会话）优先，
+    /// 未配置时回退车级 vehicle_token（只能查询，车控会返回 no access found）
+    private var effectiveCommandAuth: String {
+        let user = normalizeBearer(nioUserAccessToken)
+        if !user.isEmpty { return user }
+        return normalizeBearer(nioVehicleAccessToken)
+    }
+
+    // MARK: - WebSocket 实时流（/api/2/ws/command/connect，哨兵/召车/车控事件推送通道，逆向实验功能）
+
+    @Published var isCommandStreamConnected = false
+    @Published var commandStreamLog: [String] = []
+    private var commandStreamTask: URLSessionWebSocketTask?
+    private var isCommandStreamClosedByUser = false
+
+    /// 连接命令实时流：wss://tsp.nio.com/api/2/ws/command/connect?签名字段（md5_full，同 REST 通道）
+    func connectCommandStream() {
+        guard commandStreamTask == nil else { return }
+        let vid = nioVehicleId
+        let auth = effectiveCommandAuth
+        let secret = nioVehicleSignSecret.isEmpty ? NIOVehicleLib.builtinSignSecret : nioVehicleSignSecret
+        guard !vid.isEmpty, !auth.isEmpty else {
+            appendLog(NIOFetchLogEntry(category: "ws_stream", level: "error", message: "实时流连接失败：缺少 vehicle_id / Token", detail: nil, timestamp: Date(), requestURL: nil, requestMethod: nil, requestBody: nil, responsePreview: nil, statusCode: nil))
+            return
+        }
+        let path = "/api/2/ws/command/connect"
+        var params: [String: String] = [
+            "app_id": NIOVehicleLib.androidAppID,
+            "app_ver": "6.5.3",
+            "device_id": nioDeviceId.isEmpty ? "iOS_Device_\(vid.prefix(6))" : nioDeviceId,
+            "vehicle_id": vid,
+            "lang": "zh-CN",
+            "region": "cn",
+            "timestamp": String(Int(Date().timeIntervalSince1970))
+        ]
+        let sign = NIOVehicleLib.computeAndroidSign(method: "GET", path: path, params: params, secret: secret, authorization: auth)
+        params["sign"] = sign
+        let canon = params.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: "&")
+        guard let url = URL(string: "wss://tsp.nio.com\(path)?\(canon)") else { return }
+
+        isCommandStreamClosedByUser = false
+        var req = URLRequest(url: url)
+        req.setValue(auth, forHTTPHeaderField: "Authorization")
+        req.setValue("NextevCar/6.5.3 (iPhone; iOS 18.0)", forHTTPHeaderField: "User-Agent")
+        let task = URLSession.shared.webSocketTask(with: req)
+        commandStreamTask = task
+        task.resume()
+        streamReceiveLoop(task)
+        // 5s 内未收到任何帧则视为连接失败
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 5_000_000_000)
+            if !isCommandStreamClosedByUser && commandStreamTask === task && !isCommandStreamConnected {
+                streamLog("⏱️ 5s 无响应（握手参数可能不符，详见诊断日志）")
+            }
+        }
+        streamLog("🔌 正在连接 wss://tsp.nio.com\(path) …")
+    }
+
+    func disconnectCommandStream() {
+        isCommandStreamClosedByUser = true
+        commandStreamTask?.cancel(with: .normalClosure, reason: nil)
+        commandStreamTask = nil
+        isCommandStreamConnected = false
+        streamLog("📴 已断开实时流")
+    }
+
+    private func streamReceiveLoop(_ task: URLSessionWebSocketTask) {
+        task.receive { [weak self] result in
+            guard let self else { return }
+            Task { @MainActor in
+                guard self.commandStreamTask === task else { return }
+                switch result {
+                case .success(let msg):
+                    self.isCommandStreamConnected = true
+                    switch msg {
+                    case .string(let s): self.streamLog("📨 \(String(s.prefix(500)))")
+                    case .data(let d): self.streamLog("📦 [\(d.count)B] \(String(data: d.prefix(500), encoding: .utf8) ?? "hex:\(d.prefix(32).map { String(format: "%02x", $0) }.joined())")")
+                    @unknown default: break
+                    }
+                    self.streamReceiveLoop(task)
+                case .failure(let err):
+                    self.isCommandStreamConnected = false
+                    if !self.isCommandStreamClosedByUser {
+                        self.streamLog("❌ 连接断开：\(err.localizedDescription)")
+                    }
+                }
+            }
+        }
+    }
+
+    private func streamLog(_ line: String) {
+        commandStreamLog.append("\(NIOFormatters.clockShort.string(from: Date())) \(line)")
+        if commandStreamLog.count > 60 { commandStreamLog.removeFirst(commandStreamLog.count - 60) }
+        appendLog(NIOFetchLogEntry(category: "ws_stream", level: "info", message: line, detail: nil, timestamp: Date(), requestURL: nil, requestMethod: nil, requestBody: nil, responsePreview: nil, statusCode: nil))
+    }
+
+    // MARK: - 蓝牙钥匙（virtual_key v3 接口逆向：GET /api/1/vehicle/virtual_key/list_by_vehicle_v3，需用户级 token）
+
+    @Published var virtualKeys: [[String: Any]] = []
+    @Published var isLoadingVirtualKeys = false
+    @Published var virtualKeysError: String?
+
+    /// 拉取蓝牙钥匙列表（宽容解码：字段结构未完全逆向，保留原始字典供 UI 渐进渲染）
+    func fetchVirtualKeys() async {
+        let vid = nioVehicleId
+        guard !vid.isEmpty else { virtualKeysError = "未配置 vehicle_id"; return }
+        let secret = nioVehicleSignSecret.isEmpty ? NIOVehicleLib.builtinSignSecret : nioVehicleSignSecret
+        let auth = effectiveCommandAuth
+        guard !auth.isEmpty else { virtualKeysError = "未配置 Token"; return }
+
+        isLoadingVirtualKeys = true
+        defer { isLoadingVirtualKeys = false }
+        let path = "/api/1/vehicle/virtual_key/list_by_vehicle_v3"
+        var params: [String: String] = [
+            "app_id": NIOVehicleLib.androidAppID,
+            "app_ver": "6.5.3",
+            "device_id": nioDeviceId.isEmpty ? "iOS_Device_\(vid.prefix(6))" : nioDeviceId,
+            "vehicle_id": vid,
+            "lang": "zh-CN",
+            "region": "cn",
+            "timestamp": String(Int(Date().timeIntervalSince1970))
+        ]
+        let sign = NIOVehicleLib.computeAndroidSign(method: "GET", path: path, params: params, secret: secret, authorization: auth)
+        params["sign"] = sign
+        let canon = params.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: "&")
+        guard let url = URL(string: "https://tsp.nio.com\(path)?\(canon)") else { virtualKeysError = "URL 构建失败"; return }
+
+        var req = URLRequest(url: url)
+        req.setValue(auth, forHTTPHeaderField: "Authorization")
+        req.setValue("NextevCar/6.5.3 (iPhone; iOS 18.0)", forHTTPHeaderField: "User-Agent")
+        do {
+            let (data, resp) = try await URLSession.shared.data(for: req)
+            let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
+            if (obj["result_code"] as? String) == "success" {
+                let d = obj["data"] as? [String: Any] ?? [:]
+                // 容忍多种包装：data.list / data.keys / data 直接数组
+                if let list = (d["list"] ?? d["keys"] ?? d["key_list"]) as? [[String: Any]] {
+                    virtualKeys = list
+                    virtualKeysError = nil
+                } else if let arr = obj["data"] as? [[String: Any]] {
+                    virtualKeys = arr
+                    virtualKeysError = nil
+                } else {
+                    virtualKeys = []
+                    virtualKeysError = "响应结构未识别：\(String(data: data, encoding: .utf8)?.prefix(200) ?? "")"
+                }
+            } else {
+                let msg = obj["result_msg"] as? String ?? obj["debug_msg"] as? String ?? "HTTP \((resp as? HTTPURLResponse)?.statusCode ?? 0)"
+                virtualKeys = []
+                virtualKeysError = String(msg)
+            }
+        } catch {
+            virtualKeysError = "网络错误：\(error.localizedDescription)"
+        }
+    }
+
     // MARK: - 灵动岛 / 实时活动 (Live Activity) 管理
 
     @Published var isLiveActivityActive = false
@@ -1410,6 +1655,11 @@ final class NIOService: ObservableObject {
         let frdgPwr = (frdg["frdg_pwr_sts"]?.intValue == 1)
         let frdgTemp = frdg["frdg_cur_t"]?.doubleValue ?? frdg["frdg_tar_t"]?.doubleValue
         let v2l = (socStatus?.v2lStatus == 1)
+        // 特殊模式：超强干燥 / 极速除霜 / 座舱过热保护（hvac 状态位，1=进行中）
+        let hvac = status.hvacStatus
+        let hiDry = (hvac?.cbnHiTDrySts ?? 0) == 1
+        let defrost = (hvac?.ccuMaxDefrstSts ?? 0) == 1
+        let overheat = (hvac?.cbnOvrHtActSts ?? 0) == 1
         let lvBatt = status.lvBattStatus ?? [:]
         let lvSoc = lvBatt["lv_batt_soc"]?.intValue
         let lvVolt = lvBatt["lv_batt_volt"]?.doubleValue
@@ -1419,16 +1669,27 @@ final class NIOService: ObservableObject {
         let fotaInfo = NIOVehicleLib.parseFotaInfo(version: rawFotaVer)
         let vehicleVersion = fotaInfo.shortVer.isEmpty ? nil : fotaInfo.fullDisplay
 
-        // 充电目标（上限）：target_soc_percentage 为用户设定的限充值（与看板"目标电量"同源），
-        // max_soc 是满电 CLTC 相关字段而非限充，锁电 lock_soc 最后兜底
-        let rawTarget = socStatus?.targetSocPercentage ?? socStatus?.maxSoc ?? socStatus?.lockSoc ?? 0
-        let targetSoc = (rawTarget > soc && rawTarget <= 100) ? rawTarget : 100.0
+        // 充电目标（上限）：target_soc_percentage 为用户设定的限充值（与看板"目标电量"同源）。
+        // 注意：max_soc 不是限充字段（服务端常驻默认 90，导致上限永远显示 90%），不参与兜底；
+        // 仅 target_soc_percentage → lock_soc → 100 递退。
+        let rawTarget = socStatus?.targetSocPercentage ?? socStatus?.lockSoc ?? 0
+        let targetSoc = (rawTarget > 1 && rawTarget <= 100) ? rawTarget : 100.0
         let capacityKwh = estimateBatteryCapacityKwh(socStatus: socStatus)
         var etaDate: Date? = nil
-        if isCharging, let p = power, p > 0.3 {
-            let remainKwh = max(0.0, (targetSoc - soc) / 100.0 * capacityKwh)
-            if remainKwh > 0.2 {
-                etaDate = Date().addingTimeInterval(remainKwh / p * 60.0)
+        if isCharging {
+            // 优先服务端 estimate_charge_end_time（epoch 秒，车机侧真实预估，含 CV 段降功率非线性），
+            // 本地功率线性推算只在服务端未给出或明显过期时兜底
+            if let serverEta = socStatus?.estimateChargeEndTime, serverEta > 0 {
+                let eta = Date(timeIntervalSince1970: TimeInterval(serverEta))
+                if eta.timeIntervalSinceNow > -60 && eta.timeIntervalSinceNow < 24 * 3600 {
+                    etaDate = eta
+                }
+            }
+            if etaDate == nil, let p = power, p > 0.3 {
+                let remainKwh = max(0.0, (targetSoc - soc) / 100.0 * capacityKwh)
+                if remainKwh > 0.2 {
+                    etaDate = Date().addingTimeInterval(remainKwh / p * 60.0)
+                }
             }
         }
 
@@ -1459,6 +1720,9 @@ final class NIOService: ObservableObject {
             frdgActive: frdgPwr,
             frdgTemp: frdgTemp,
             v2lActive: v2l,
+            hiDryActive: hiDry,
+            defrostActive: defrost,
+            overheatProtectActive: overheat,
             updateTimestamp: lastVehicleFetch ?? Date(),
             themeRaw: AnimeThemeService.shared.currentStyle.rawValue,
             chargingTargetSoc: targetSoc,
@@ -1514,9 +1778,15 @@ final class NIOService: ObservableObject {
         // 残留引用 + 未变化的指纹会导致永远无法重新上岛。
         // activities 跨进程查询有开销，本轮只取一次复用。
         let systemActivities = Activity<WheaterAttributes>.activities
-        if let stale = currentActivity, !systemActivities.contains(where: { $0.id == stale.id }) {
-            currentActivity = nil
-            lastActivityFingerprint = nil
+        if let stale = currentActivity {
+            let gone = !systemActivities.contains(where: { $0.id == stale.id })
+            let ended = stale.activityState == .dismissed || stale.activityState == .ended
+            // 被用户长按强制下岛（活动已移除或状态 ended/dismissed）→ 清残留引用，
+            // 否则残留引用 + 未变化指纹会永远阻止重新上岛
+            if gone || ended {
+                currentActivity = nil
+                lastActivityFingerprint = nil
+            }
         }
 
         // 去重节流：显著数据无变化时跳过更新，降低 ActivityKit 系统刷新频率与功耗
@@ -1990,5 +2260,209 @@ final class NIOProximityMonitor: ObservableObject {
         case .idle:
             break
         }
+    }
+}
+import Foundation
+
+// MARK: - 车控指令（iOS 6.5.3 包逆向：REST 异步命令通道 + 服务密码 PIN 验证）
+//
+// 通道：POST https://tsp.nio.com/api/1/vehicle/command/{function} → data.command_id
+//       → GET  /api/1/vehicle/command/{command_id} 轮询 result_status（≤15s）。
+// 签名：与车况同套 md5_full（Android/iOS 通用 secret，POST + path + sorted_query + secret + Authorization）。
+// 敏感指令：服务端要求服务密码时返回 PIN 相关错误 → UI 弹输入框 →
+//       RSA/PKCS1 加密后 POST /api/1/poseidon/verify_pin → 成功后重发原指令。
+extension NIOService {
+
+    enum VehicleCommandResult {
+        case success(String)
+        case needPin
+        case failure(String)
+    }
+
+    /// 发送车控指令（进度/结果通过 publishTransientNotice 横幅反馈）
+    /// 签名档位重试：档位A（body 键值并入 query 签名）→ 疑似签名错误时档位B（body 原文拼接）重试。
+    /// 每次尝试均写入 fetchLogs（category=vehicle_command），失败原因可在诊断页查看。
+    @MainActor
+    func sendVehicleCommand(function: String, title: String, parameters: [String: Any] = [:]) async -> VehicleCommandResult {
+        let vid = nioVehicleId
+        guard !vid.isEmpty else { return .failure("车控不可用：未配置 vehicle_id") }
+        guard nioVehicleSignAlgo.isEmpty || nioVehicleSignAlgo == "md5_full" else {
+            return .failure("车控需要 md5_full 签名算法（配置页切换）")
+        }
+        let secret = nioVehicleSignSecret.isEmpty ? NIOVehicleLib.builtinSignSecret : nioVehicleSignSecret
+        let auth = effectiveCommandAuth
+        guard !auth.isEmpty else { return .failure("车控不可用：未配置 Token") }
+
+        publishTransientNotice(.info, "⌚️ \(title)：指令发送中…")
+
+        var body = parameters
+        if body["vehicle_id"] == nil { body["vehicle_id"] = vid }
+        let bodyData = (try? JSONSerialization.data(withJSONObject: body)) ?? Data()
+        let bodyJSON = String(data: bodyData, encoding: .utf8) ?? ""
+
+        // 档位A → 档位B 重试梯
+        for mode in [NIOVehicleLib.CommandSignMode.mergedIntoQuery, .rawAppend] {
+            guard let built = NIOVehicleLib.buildCommandRequest(
+                function: function, vehicleId: vid, deviceId: nioDeviceId,
+                secret: secret, authorization: auth, bodyJSON: bodyJSON, signMode: mode
+            ) else { return .failure("车控请求构建失败") }
+
+            var request = URLRequest(url: built.url)
+            request.httpMethod = "POST"
+            request.setValue(auth, forHTTPHeaderField: "Authorization")
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.setValue("NextevCar/6.5.3 (iPhone; iOS 18.0)", forHTTPHeaderField: "User-Agent")
+            request.httpBody = bodyData
+
+            let data: Data
+            let http: HTTPURLResponse?
+            do {
+                let (d, r) = try await URLSession.shared.data(for: request)
+                data = d; http = r as? HTTPURLResponse
+            } catch {
+                return .failure("网络错误：\(error.localizedDescription)")
+            }
+            let text = String(data: data, encoding: .utf8) ?? ""
+            let status = http?.statusCode ?? 0
+
+            // 服务端要求服务密码 → 交由 UI 弹 PIN 输入框
+            if isPinRequired(text, status) { return .needPin }
+
+            guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  (obj["result_code"] as? String) == "success" else {
+                let msg = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["result_msg"] as? String
+                    ?? "HTTP \(status) \(String(text.prefix(160)))"
+                appendLog(NIOFetchLogEntry(
+                    category: "vehicle_command", level: "error",
+                    message: "车控 \(function) 被拒绝（签名档位 \(mode == .mergedIntoQuery ? "A" : "B")）",
+                    detail: "HTTP \(status) · \(msg) · body=\(bodyJSON)",
+                    timestamp: Date(), requestURL: built.url.absoluteString, requestMethod: "POST",
+                    requestBody: bodyJSON, responsePreview: String(text.prefix(400)), statusCode: status
+                ))
+                // 疑似签名错误才换档重试；鉴权/参数类错误换档无意义
+                let looksLikeSignError = status == 403
+                    || msg.lowercased().contains("sign")
+                    || msg.lowercased().contains("鉴权")
+                let looksLikeAuthError = msg.lowercased().contains("not login")
+                    || msg.lowercased().contains("unauthorized") || status == 401
+                if looksLikeAuthError {
+                    return .failure("车控被拒绝：\(msg)\n车控指令需要用户级 access_token（App 登录会话），车级 vehicle_token 仅能查询车况。请到设置页录入用户级 Token")
+                }
+                if looksLikeSignError && mode == .mergedIntoQuery { continue }
+                return .failure("服务端拒绝：\(msg)")
+            }
+
+            guard let cmdID = (obj["data"] as? [String: Any])?["command_id"] as? String, !cmdID.isEmpty else {
+                appendLog(NIOFetchLogEntry(
+                    category: "vehicle_command", level: "info",
+                    message: "车控 \(function) 已受理（无 command_id）",
+                    detail: "签名档位 \(mode == .mergedIntoQuery ? "A" : "B") · \(String(text.prefix(200)))",
+                    timestamp: Date(), requestURL: built.url.absoluteString, requestMethod: "POST",
+                    requestBody: bodyJSON, responsePreview: String(text.prefix(400)), statusCode: status
+                ))
+                return .success("\(title)：指令已受理")
+            }
+
+            // 轮询执行结果
+            for _ in 0..<15 {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                guard let pollURL = NIOVehicleLib.buildCommandPollRequest(
+                    commandID: cmdID, vehicleId: vid, deviceId: nioDeviceId,
+                    secret: secret, authorization: auth
+                ) else { continue }
+                var preq = URLRequest(url: pollURL)
+                preq.setValue(auth, forHTTPHeaderField: "Authorization")
+                preq.setValue("NextevCar/6.5.3 (iPhone; iOS 18.0)", forHTTPHeaderField: "User-Agent")
+                guard let (pdata, presp) = try? await URLSession.shared.data(for: preq),
+                      let pobj = try? JSONSerialization.jsonObject(with: pdata) as? [String: Any],
+                      let pd = pobj["data"] as? [String: Any] else { continue }
+                let st = (pd["result_status"] as? String) ?? (pd["status"] as? String) ?? ""
+                if st.lowercased() == "success" {
+                    appendLog(NIOFetchLogEntry(
+                        category: "vehicle_command", level: "info",
+                        message: "车控 \(function) 执行成功",
+                        detail: "command_id=\(cmdID) · 签名档位 \(mode == .mergedIntoQuery ? "A" : "B")",
+                        timestamp: Date(), requestURL: pollURL.absoluteString, requestMethod: "GET",
+                        requestBody: nil, responsePreview: String((String(data: pdata, encoding: .utf8) ?? "").prefix(400)), statusCode: (presp as? HTTPURLResponse)?.statusCode
+                    ))
+                    return .success("\(title)：执行成功 ✓")
+                }
+                if st.lowercased().contains("fail") || st.lowercased().contains("error") {
+                    return .failure("\(title)：车辆执行失败（\(st)）")
+                }
+            }
+            return .success("\(title)：已受理，车辆执行中")
+        }
+        return .failure("服务端拒绝：签名双档位均被拒（详见诊断日志）")
+    }
+
+    /// 服务端是否要求服务密码（PIN）
+    private func isPinRequired(_ body: String, _ status: Int) -> Bool {
+        let low = body.lowercased()
+        return low.contains("pin_required") || low.contains("need_pin") || low.contains("pin_code")
+            || low.contains("verify_pin") || low.contains("pin_error") || status == 428
+    }
+
+    /// 验证服务密码（RSA/PKCS1 加密 → /api/1/poseidon/verify_pin），成功后重发原指令
+    /// POST body 参与签名（双档位，与车控通道一致）
+    @MainActor
+    func verifyPinAndRetry(_ pin: String, function: String, title: String, parameters: [String: Any] = [:]) async -> VehicleCommandResult {
+        guard !pin.isEmpty else { return .failure("请输入服务密码") }
+        guard let enc = NIOVehicleLib.encryptPinCode(pin) else { return .failure("PIN 加密失败") }
+
+        let vid = nioVehicleId
+        let secret = nioVehicleSignSecret.isEmpty ? NIOVehicleLib.builtinSignSecret : nioVehicleSignSecret
+        let auth = effectiveCommandAuth
+        let path = "/api/1/poseidon/verify_pin"
+        let bodyJSON: String = {
+            let d = (try? JSONSerialization.data(withJSONObject: ["pin_code": enc])) ?? Data()
+            return String(data: d, encoding: .utf8) ?? ""
+        }()
+
+        // 双档位：A = body 键值并入 query 签名；B = body 原文拼入签名输入串
+        for rawAppendMode in [false, true] {
+            var params: [String: String] = [
+                "app_id": NIOVehicleLib.androidAppID,
+                "app_ver": "6.5.3",
+                "device_id": nioDeviceId.isEmpty ? "iOS_Device_\(vid.prefix(6))" : nioDeviceId,
+                "vehicle_id": vid,
+                "lang": "zh-CN",
+                "region": "cn",
+                "timestamp": String(Int(Date().timeIntervalSince1970))
+            ]
+            if !rawAppendMode { params["pin_code"] = enc }
+            let sign = rawAppendMode
+                ? NIOVehicleLib.md5("POST\(path)?\(NIOVehicleLib.sortedQuery(params))\(bodyJSON)\(secret)\(auth)")
+                : NIOVehicleLib.computeAndroidSign(method: "POST", path: path, params: params, secret: secret, authorization: auth)
+            params["sign"] = sign
+            let canon = params.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: "&")
+            guard let url = URL(string: "https://tsp.nio.com\(path)?\(canon)") else { return .failure("PIN 请求构建失败") }
+
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.setValue(auth, forHTTPHeaderField: "Authorization")
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.setValue("NextevCar/6.5.3 (iPhone; iOS 18.0)", forHTTPHeaderField: "User-Agent")
+            request.httpBody = Data(bodyJSON.utf8)
+
+            let data: Data
+            do {
+                let (d, _) = try await URLSession.shared.data(for: request)
+                data = d
+            } catch {
+                return .failure("PIN 验证网络错误：\(error.localizedDescription)")
+            }
+            let obj = (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
+            let resultMsg = obj["result_msg"] as? String ?? ""
+            if (obj["result_code"] as? String) == "success" {
+                publishTransientNotice(.success, "🔑 服务密码验证通过，重发指令…")
+                return await sendVehicleCommand(function: function, title: title, parameters: parameters)
+            }
+            // 疑似签名错误且还有档位 → 换档重试
+            let looksLikeSignError = resultMsg.lowercased().contains("sign")
+            if looksLikeSignError && !rawAppendMode { continue }
+            return .failure("服务密码错误：\(resultMsg.isEmpty ? "验证被拒绝" : resultMsg)")
+        }
+        return .failure("服务密码验证被拒绝（签名双档位均失败）")
     }
 }
