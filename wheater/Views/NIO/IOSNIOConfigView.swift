@@ -117,6 +117,29 @@ struct IOSNIOConfigView: View {
                                     // 4. ⚡️ 智能识别与一键填充
                                     smartParseCard
 
+                                    // 4.5 💾 备份与恢复（重装迁移）
+                                    NavigationLink {
+                                        NIOConfigBackupView()
+                                    } label: {
+                                        HStack(spacing: 10) {
+                                            Image(systemName: "externaldrive.badge.timemachine")
+                                                .font(.system(size: 15, weight: .semibold))
+                                                .foregroundStyle(mintCyan)
+                                                .frame(width: 22)
+                                            Text("备份与恢复（重装迁移）")
+                                                .font(.system(size: 14, weight: .semibold))
+                                                .foregroundStyle(NIOThemePaint.text)
+                                            Spacer()
+                                            Image(systemName: "chevron.right")
+                                                .font(.system(size: 11, weight: .semibold))
+                                                .foregroundStyle(.secondary)
+                                        }
+                                        .padding(14)
+                                        .background(NIOThemePaint.well)
+                                        .clipShape(RoundedRectangle(cornerRadius: 14))
+                                    }
+                                    .buttonStyle(.plain)
+
                                     // 5. 🚗 核心车辆 API (必填)
                                     vehicleApiCard
 
