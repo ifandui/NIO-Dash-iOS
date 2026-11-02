@@ -41,6 +41,7 @@ struct NIOCredentialInboxView: View {
     @ObservedObject private var themeService = AnimeThemeService.shared
     @State private var revealSecrets = false
     @State private var expandedSampleIDs: Set<String> = []
+    @State private var includeSecretInExport = false
     // 导出 / 导入（文件 App）
     @State private var isExporting = false
     @State private var exportDocument: NIOInboxDocument?
@@ -54,6 +55,22 @@ struct NIOCredentialInboxView: View {
         let f = DateFormatter()
         f.dateFormat = "yyyyMMdd-HHmm"
         return "nio_credentials_\(f.string(from: Date()))"
+    }
+
+    /// 全量导出载荷 = 收件箱直推载荷 + 当前手动配置的换电/签到 API 与 Token
+    /// （签名密钥仅在开关打开时包含，默认不含）
+    private func buildExportPayload(includeSecret: Bool) -> [String: Any] {
+        var payload = receiver.inboxPayload ?? [:]
+        let service = NIOService.shared
+        if !service.nioChangeApiURL.isEmpty { payload["change_url"] = service.nioChangeApiURL }
+        if !service.nioChangeAccessToken.isEmpty { payload["change_token"] = service.nioChangeAccessToken }
+        if !service.nioCheckinApiURL.isEmpty { payload["checkin_url"] = service.nioCheckinApiURL }
+        if !service.nioCheckinAccessToken.isEmpty { payload["checkin_token"] = service.nioCheckinAccessToken }
+        if includeSecret, !service.nioVehicleSignSecret.isEmpty { payload["sign_secret"] = service.nioVehicleSignSecret }
+        let f = ISO8601DateFormatter()
+        payload["exported_at"] = f.string(from: Date())
+        payload["export_version"] = 2
+        return payload
     }
 
     /// 凭证字段展示清单（key → 中文名）
@@ -87,10 +104,9 @@ struct NIOCredentialInboxView: View {
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     HStack(spacing: 2) {
-                        // 导出：收件箱整包 JSON 存到「文件」App
+                        // 导出：全量凭证快照（收件箱载荷 + 换电/签到 Token）存到「文件」App
                         Button {
-                            guard let payload = receiver.inboxPayload else { return }
-                            exportDocument = NIOInboxDocument(json: payload)
+                            exportDocument = NIOInboxDocument(json: buildExportPayload(includeSecret: includeSecretInExport))
                             isExporting = true
                         } label: {
                             Image(systemName: "square.and.arrow.up")
@@ -214,6 +230,15 @@ struct NIOCredentialInboxView: View {
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
             }
+            Toggle(isOn: $includeSecretInExport) {
+                Text("导出包含签名密钥（换机迁移用，谨慎开启）")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+            }
+            .toggleStyle(.switch)
+            .tint(includeSecretInExport ? .orange : .secondary)
+            .scaleEffect(0.8, anchor: .trailing)
+            .frame(height: 22)
         }
         .padding(12)
         .background(NIOThemePaint.well)

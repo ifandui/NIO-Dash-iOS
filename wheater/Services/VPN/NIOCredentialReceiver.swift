@@ -298,12 +298,25 @@ final class NIOCredentialReceiver: ObservableObject {
         let userToken  = Self.clean(json["user_token"]    as? String ?? "")
         let commandSamples  = json["command_samples"]  as? [[String: Any]] ?? []
         let poseidonSamples = json["poseidon_samples"] as? [[String: Any]] ?? []
+        // 全量导出（export_version 2）附加字段：换电/签到 API 与 Token、签名密钥（可选）
+        let changeURL    = Self.clean(json["change_url"]    as? String ?? "")
+        let changeToken  = Self.clean(json["change_token"]  as? String ?? "")
+        let checkinURL   = Self.clean(json["checkin_url"]   as? String ?? "")
+        let checkinToken = Self.clean(json["checkin_token"] as? String ?? "")
+        let signSecret   = Self.clean(json["sign_secret"]   as? String ?? "")
 
         Task { @MainActor [weak self] in
             guard let self else { return }
             self.receiveCount += 1
             self.lastReceivedAt = Date()
             self.statusMessage = "📄 已从文件导入并回填"
+            // 换电/签到/密钥等不走直推去重，先于 applyCredentials 直接回填
+            let service = NIOService.shared
+            if !changeURL.isEmpty    { service.nioChangeApiURL = changeURL }
+            if !changeToken.isEmpty  { service.nioChangeAccessToken = changeToken }
+            if !checkinURL.isEmpty   { service.nioCheckinApiURL = checkinURL }
+            if !checkinToken.isEmpty { service.nioCheckinAccessToken = checkinToken }
+            if !signSecret.isEmpty   { service.nioVehicleSignSecret = signSecret }
             self.applyCredentials(
                 token: token, vehicleId: vehicleId,
                 deviceId: deviceId, vehicleUrl: !rvsUrl.isEmpty ? rvsUrl : vehicleUrl,
