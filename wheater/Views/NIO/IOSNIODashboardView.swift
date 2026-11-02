@@ -1464,8 +1464,13 @@ struct NIOVehicleControlPanel: View {
                         VStack(spacing: 6) {
                             Image(systemName: cmd.icon)
                                 .font(.system(size: 17, weight: .semibold))
+                                .frame(height: 20)
+                            // 单行缩放：避免"发动机禁用"等长标题换行导致同行按钮高度不一
                             Text(cmd.title)
                                 .font(.caption2.weight(.medium))
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.6)
+                                .frame(height: 13)
                         }
                         .foregroundStyle(isSending ? Color.secondary : (cmd.sensitive ? Color.orange : Color.primary))
                         .frame(maxWidth: .infinity)

@@ -1681,18 +1681,12 @@ final class NIOService: ObservableObject {
         let capacityKwh = estimateBatteryCapacityKwh(socStatus: socStatus)
         var etaDate: Date? = nil
         if isCharging {
-            // 优先服务端 estimate_charge_end_time（epoch 秒，车机侧真实预估，含 CV 段降功率非线性），
-            // 本地功率线性推算只在服务端未给出或明显过期时兜底
+            // 剩余充电时间：只用服务端 estimate_charge_end_time（车机侧真实预估，含 CV 段降功率非线性），
+            // 服务端未给出时保持 nil 不展示——不做本地推算兜底（功率线性外推误差大，宁缺毋假）
             if let serverEta = socStatus?.estimateChargeEndTime, serverEta > 0 {
                 let eta = Date(timeIntervalSince1970: TimeInterval(serverEta))
                 if eta.timeIntervalSinceNow > -60 && eta.timeIntervalSinceNow < 24 * 3600 {
                     etaDate = eta
-                }
-            }
-            if etaDate == nil, let p = power, p > 0.3 {
-                let remainKwh = max(0.0, (targetSoc - soc) / 100.0 * capacityKwh)
-                if remainKwh > 0.2 {
-                    etaDate = Date().addingTimeInterval(remainKwh / p * 60.0)
                 }
             }
         }

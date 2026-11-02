@@ -768,16 +768,22 @@ struct IOSNIOConfigView: View {
                         if receiver.isListening { receiver.stopListening() }
                         else { receiver.startListening() }
                     }) {
-                        Label(receiver.isListening ? "停止接收" : "1. 开始接收",
-                              systemImage: receiver.isListening ? "stop.fill" : "antenna.radiowaves.left.and.right")
-                            .font(.system(size: 10, weight: .bold))
-                            .padding(.vertical, 8)
-                            .padding(.horizontal, 8)
-                            .frame(maxWidth: .infinity)
-                            .background(receiver.isListening ? sakuraPink.opacity(0.2) : sakuraPink.opacity(0.15))
-                            .foregroundStyle(sakuraPink)
-                            .clipShape(RoundedRectangle(cornerRadius: 8))
-                            .overlay(RoundedRectangle(cornerRadius: 8).stroke(sakuraPink.opacity(0.4), lineWidth: 0.5))
+                        VStack(spacing: 3) {
+                            Image(systemName: receiver.isListening ? "stop.fill" : "antenna.radiowaves.left.and.right")
+                                .font(.system(size: 13, weight: .semibold))
+                                .frame(height: 16)
+                            Text(receiver.isListening ? "停止接收" : "1. 开始接收")
+                                .font(.system(size: 9, weight: .bold))
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.7)
+                                .frame(height: 12)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 7)
+                        .background(receiver.isListening ? sakuraPink.opacity(0.2) : sakuraPink.opacity(0.15))
+                        .foregroundStyle(sakuraPink)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(sakuraPink.opacity(0.4), lineWidth: 0.5))
                     }
 
                     // 复制模块链接（Shadowrocket 可直接导入）
@@ -786,28 +792,42 @@ struct IOSNIOConfigView: View {
                         let impact = UIImpactFeedbackGenerator(style: .light)
                         impact.impactOccurred()
                     }) {
-                        Label("2. 复制模块链接", systemImage: "doc.on.clipboard")
-                            .font(.system(size: 10, weight: .bold))
-                            .padding(.vertical, 8)
-                            .padding(.horizontal, 8)
-                            .frame(maxWidth: .infinity)
-                            .background(NIOThemePaint.well)
-                            .foregroundStyle(NIOThemePaint.text.opacity(0.8))
-                            .clipShape(RoundedRectangle(cornerRadius: 8))
-                            .overlay(RoundedRectangle(cornerRadius: 8).stroke(NIOThemePaint.stroke, lineWidth: 0.5))
+                        VStack(spacing: 3) {
+                            Image(systemName: "doc.on.clipboard")
+                                .font(.system(size: 13, weight: .semibold))
+                                .frame(height: 16)
+                            Text("2. 复制模块链接")
+                                .font(.system(size: 9, weight: .bold))
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.7)
+                                .frame(height: 12)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 7)
+                        .background(NIOThemePaint.well)
+                        .foregroundStyle(NIOThemePaint.text.opacity(0.8))
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(NIOThemePaint.stroke, lineWidth: 0.5))
                     }
 
                     // 凭证收件箱：查看 / 复制最近推送的每个字段与抓包样本
                     Button(action: { showInboxSheet = true }) {
-                        Label("3. 凭证收件箱", systemImage: "tray.full.fill")
-                            .font(.system(size: 10, weight: .bold))
-                            .padding(.vertical, 8)
-                            .padding(.horizontal, 8)
-                            .frame(maxWidth: .infinity)
-                            .background(mintCyan.opacity(0.15))
-                            .foregroundStyle(mintCyan)
-                            .clipShape(RoundedRectangle(cornerRadius: 8))
-                            .overlay(RoundedRectangle(cornerRadius: 8).stroke(mintCyan.opacity(0.4), lineWidth: 0.5))
+                        VStack(spacing: 3) {
+                            Image(systemName: "tray.full.fill")
+                                .font(.system(size: 13, weight: .semibold))
+                                .frame(height: 16)
+                            Text("3. 凭证收件箱")
+                                .font(.system(size: 9, weight: .bold))
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.7)
+                                .frame(height: 12)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 7)
+                        .background(mintCyan.opacity(0.15))
+                        .foregroundStyle(mintCyan)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(mintCyan.opacity(0.4), lineWidth: 0.5))
                     }
                 }
 
