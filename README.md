@@ -108,6 +108,16 @@
 
 ## 📜 更新日志
 
+### v5.2.0 (Build 2809) · 2026-11
+- 📥 新增「凭证收件箱」：Shadowrocket 直推的每个字段（车级/用户级 Token、VehicleID、设备指纹…）集中展示，Token 打码显示、点行复制、整包 JSON 复制；收件箱持久化（重启不丢）
+- 📤⬇️ 收件箱导出/导入：整包 JSON 存到「文件」App，可从文件导入回填，换机迁移凭证一条龙
+- 🚀 Shadowrocket 模块 v3.1：新增用户级 Token 捕获（车控/蓝牙钥匙/RVS 必需）、官方车控指令原文捕获（端点+body）、车机扫码授权链路（poseidon）响应捕获——工程模式扫码的服务端权限判定原文直接抓给你看
+- 🧹 智能识别净化：剪贴板/文件导入自动过滤抓包样本字段，只填干净凭证，解析备注可审计
+- 🌸 横幅修复：凭证回填从不弹横幅的问题修复；设置页停留也能看到；点击关闭 + 时长加长 + 两行不截断
+- 🔐 安全加固：签名密钥移出代码仓库（gitignore 的本地 `NIO_Secrets.plist`），公开仓库不含真实密钥；新环境需在设置页填入
+- 🛠 车控与车况修复：充满时间（服务端 ETA）、限充上限误显 90%、行驶车速解码、停车地图实时刷新、灵动岛布局错位与强制下岛自愈、充电口「注意」误报、特殊模式（强化干燥/极速除霜/过热保护）四端显示、省电模式 Widget 预测时间线
+- 🎛 车控面板扩至 16 项指令（座垫加热/电池预热/遮阳帘/V2L 放电等）+ WebSocket 实时指令流 + 蓝牙钥匙面板
+
 ### v5.1.5 (Build 2807) · 2026-10
 - 🏠 新增桌面小组件「蔚来车况」：小 / 中尺寸，电量、续航、充电状态、温度与特殊模式徽章，主题色跟随 App（App Group 快照自动同步）
 - 🏝 灵动岛开关胶囊（iOS 18+ 控制中心 / 锁屏）：被强制下岛后一键重新上岛；修复失效引用导致的永久下岛
@@ -179,16 +189,25 @@
 > App 回放五类请求时与真机同源，服务器不再把回放判定为多端登录。UA 策略：主 App 指纹优先，Widget 指纹仅兜底。
 
 ### 链路一：Shadowrocket 模块直推（推荐日常使用）
-1. 添加模块 `scripts/shadowrocket/YumikoToys-NIO.sgmodule`（v2.3.0+，模块详情可查看 `#!version` 确认最新），开启 HTTPS 解密；
+1. 添加模块 `scripts/shadowrocket/YumikoToys-NIO.sgmodule`（v3.1.0+，模块详情可查看 `#!version` 确认最新），开启 HTTPS 解密（MITM）；
 2. iPhone 上打开 YumikoToys → 设置 → 蔚来看板 → 开启 **TCP 转发**（监听 127.0.0.1:8997）；
 3. 打开 **蔚来 App** 下拉刷新一次——小火箭自动捕获 Token / 车辆 ID / 设备指纹并**直推回填**，App 弹「已回填」即完成；
-4. Token 过期时（蔚来 App 刷新一次）会自动推送新 Token，**无感续命**；相同凭证重复推送会被 App 静默去重，不反复震动。
+4. Token 过期时（蔚来 App 刷新一次）会自动推送新 Token，**无感续命**；相同凭证重复推送会被 App 静默去重，不反复震动；
+5. **📥 凭证收件箱**（设置 → 蔚来看板 → 凭证收件箱）：直推的每个字段与抓包样本集中展示、打码/复制/导出；导出的 JSON 可在换机后一键导入回填。
+
+#### v3.1 模块捕获能力（安全研究向）
+| 捕获项 | 触发方式 | 去处 |
+|---|---|---|
+| 车级 Token / VehicleID / 设备指纹 | 蔚来 App 下拉刷新 | 自动回填 + 收件箱 |
+| **用户级 Token**（车控/钥匙/RVS 必需） | 蔚来 App 任意主界面请求 | 自动回填（优先使用） |
+| **官方车控指令原文**（端点 + body） | 在蔚来 App 点任意车控按钮 | 收件箱「🎯 车控样本」+ 诊断日志 |
+| **扫码授权链路响应原文**（poseidon） | 用蔚来 App 扫车机二维码（含工程模式） | 收件箱「🔬 扫码样本」+ 诊断日志 |
 
 ### 链路二：Mac 抓包助手 sniff.sh（备胎 / 全量 JSON）
 1. Mac 运行 `./sniff.sh iphone`（需 `brew install mitmproxy`），按提示给 iPhone 配 Wi-Fi 代理 8080 并信任 mitmproxy 证书；
 2. iPhone 上先开 YumikoToys 的 TCP 转发并保持前台，再打开蔚来 App 下拉刷新；
 3. 抓到核心凭证后**自动直推回 iPhone**（与链路一同协议），JSON 同时落盘 `nio_sniff_result.json` 并复制剪贴板；
-4. 直推失败时，把剪贴板 JSON 直接粘进 App「⚡️ 智能填充」——自动清洗反引号 / 伪 token 数组等杂质。
+4. 直推失败时，把剪贴板 JSON 直接粘进 App「⚡️ 智能填充」——自动清洗反引号 / 伪 token 数组等杂质（并自动过滤抓包样本字段）；也可以把落盘的 `nio_sniff_result.json` 通过收件箱「导入」一键回填。
 
 ### 链路三：Widget 动态签名模式（免抓包长期模式）
 1. 在 App 设置中填入 **Vehicle ID**、**Device ID** 与 **Sign Secret**；
@@ -199,6 +218,8 @@
 |---|---|---|
 | Token / 车辆 ID / device_id / sign / RVS URL | ✅ | ✅ |
 | 设备指纹三件套（app_ver / UA / User-Guid） | ✅ | ✅ |
+| 用户级 Token（车控/钥匙/RVS，v3.1+） | ✅ | ✅ |
+| 官方车控指令原文 / poseidon 扫码链路（v3.1+） | ✅ | ❌ |
 | 换电 / 签到接口 | ✅ | ✅ |
 | refresh_token / sign_secret / Token 续期（响应体） | ❌（请求型脚本无响应体） | ✅ |
 
@@ -220,7 +241,8 @@
    cd NIO-Dash-iOS
    ```
 2. 使用 Xcode 打开 `YumikoToysRR.xcodeproj`；
-3. 在 `Signing & Capabilities` 中配置您的开发者账号证书，选择真机运行安装即可。
+3. 在 `Signing & Capabilities` 中配置您的开发者账号证书，选择真机运行安装即可；
+4. 🔐 **签名密钥**：仓库不含真实 Sign Secret（`wheater/NIO_Secrets.plist` 已 gitignore）。克隆构建后请在 App 设置页手动填入签名密钥（或自建同路径 plist），否则 Widget 动态签名模式无法签名。
 
 ---
 
@@ -256,6 +278,7 @@ YumikoToysRR-Weather/
 │   │   │   ├── IOSNIODashboardView.swift    # 蔚来 27 大全景车况主看板（iPhone 分段器 / iPad·Duo 侧栏双列自适应）
 │   │   │   ├── NIODashboardCards.swift      # 六张新卡：特殊模式 / 智能外设 / 能耗评分 / 历史趋势 / 维保追踪 / 行驶轨迹
 │   │   │   ├── IOSNIOConfigView.swift       # 车机凭证配置、智能填充、抓包日志、TCP 转发、车型涂装与连通性测试
+│   │   │   ├── NIOCredentialInboxView.swift # 凭证收件箱：直推字段展示/打码/复制/导出/导入（含车控与扫码样本分区）
 │   │   │   ├── IOSAboutView.swift           # 关于兔可可、功能矩阵与版本更新日志
 │   │   │   ├── NIOCarPlayScene.swift        # CarPlay 场景与车况列表模板
 │   │   │   ├── NIOLaunchStyle.swift         # 启动风格枚举 / 节奏 / 触感 / 每日一次闸门 / 主题人设与路由器
@@ -267,6 +290,7 @@ YumikoToysRR-Weather/
 │   │   ├── Brand/                      # 蔚来品牌 Logo 与矢量图标
 │   │   └── Cars/                       # 10 款全系蔚来车型高清 3D 渲染图与车身色库
 │   ├── wheaterApp.swift                # iOS 应用程序主入口
+│   ├── NIO_Secrets.plist               # 签名密钥（gitignore 本地私有文件，仓库不含；缺失时在设置页手填）
 │   └── wheater.entitlements            # App Group 与后台刷新权限声明
 ├── docs/screenshots/                   # README 展示截图（灵动岛 / 锁屏 / 小组件 / 看板 / Duo）
 ├── auto_sniff.py                       # mitmproxy 抓包脚本（指纹捕获 + 局域网直推回 iPhone）

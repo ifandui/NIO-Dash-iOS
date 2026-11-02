@@ -275,6 +275,47 @@ final class NIOCredentialReceiver: ObservableObject {
         }
     }
 
+    /// 导入凭证载荷（收件箱「从文件导入」的统一入口）：
+    /// 与直推完全同一条回填管线（存档收件箱 → 字段提取 → applyCredentials 去重回填）
+    /// 返回 false 表示 JSON 解析失败（UI 提示）
+    @discardableResult
+    func importPayload(_ data: Data) -> Bool {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            statusMessage = "⚠️ 导入失败：不是有效的凭证 JSON"
+            return false
+        }
+        persistInbox(json)
+        let token      = Self.clean(json["vehicle_token"] as? String ?? json["token"] as? String ?? "")
+        let vehicleId  = Self.clean(json["vehicle_id"]    as? String ?? "")
+        let deviceId   = Self.clean(json["device_id"]     as? String ?? "")
+        let vehicleUrl = Self.clean(json["vehicle_url"]   as? String ?? "")
+        let rvsUrl     = Self.clean(json["rvs_url"]       as? String ?? "")
+        let sign       = Self.clean(json["sign"]          as? String ?? "")
+        let timestamp  = Self.clean(json["timestamp"]     as? String ?? "")
+        let userGuid   = Self.clean(json["user_guid"]     as? String ?? "")
+        let appVer     = Self.clean(json["app_ver"]       as? String ?? "")
+        let userAgent  = Self.clean(json["user_agent"]    as? String ?? "")
+        let userToken  = Self.clean(json["user_token"]    as? String ?? "")
+        let commandSamples  = json["command_samples"]  as? [[String: Any]] ?? []
+        let poseidonSamples = json["poseidon_samples"] as? [[String: Any]] ?? []
+
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.receiveCount += 1
+            self.lastReceivedAt = Date()
+            self.statusMessage = "📄 已从文件导入并回填"
+            self.applyCredentials(
+                token: token, vehicleId: vehicleId,
+                deviceId: deviceId, vehicleUrl: !rvsUrl.isEmpty ? rvsUrl : vehicleUrl,
+                sign: sign, timestamp: timestamp,
+                userGuid: userGuid, appVer: appVer, userAgent: userAgent,
+                userToken: userToken, commandSamples: commandSamples,
+                poseidonSamples: poseidonSamples
+            )
+        }
+        return true
+    }
+
     // MARK: - 回填凭证
 
     @MainActor

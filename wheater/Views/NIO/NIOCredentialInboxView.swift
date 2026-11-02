@@ -7,6 +7,25 @@
 //
 
 import SwiftUI
+import UniformTypeIdentifiers
+
+/// 收件箱导出文档（fileExporter 用）：内容即直推载荷原样 JSON
+struct NIOInboxDocument: FileDocument {
+    static let readableContentTypes: [UTType] = [.json]
+    var data: Data
+
+    init(json: [String: Any]) {
+        data = (try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])) ?? Data("{}".utf8)
+    }
+
+    init(configuration: ReadConfiguration) throws {
+        data = configuration.file.regularFileContents ?? Data()
+    }
+
+    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
+        FileWrapper(regularFileWithContents: data)
+    }
+}
 
 /// 收件箱样本条目模型
 struct NIOInboxSample: Identifiable {
@@ -22,8 +41,20 @@ struct NIOCredentialInboxView: View {
     @ObservedObject private var themeService = AnimeThemeService.shared
     @State private var revealSecrets = false
     @State private var expandedSampleIDs: Set<String> = []
+    // 导出 / 导入（文件 App）
+    @State private var isExporting = false
+    @State private var exportDocument: NIOInboxDocument?
+    @State private var isImporting = false
+    @State private var importResultText: String?
 
     private var accent: Color { themeService.accentColor() }
+
+    /// 导出默认文件名：nio_credentials_20261102-1930.json
+    private var defaultExportFileName: String {
+        let f = DateFormatter()
+        f.dateFormat = "yyyyMMdd-HHmm"
+        return "nio_credentials_\(f.string(from: Date()))"
+    }
 
     /// 凭证字段展示清单（key → 中文名）
     private static let fieldLabels: [(key: String, label: String)] = [
@@ -54,6 +85,26 @@ struct NIOCredentialInboxView: View {
             .navigationTitle("📥 凭证收件箱")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    HStack(spacing: 2) {
+                        // 导出：收件箱整包 JSON 存到「文件」App
+                        Button {
+                            guard let payload = receiver.inboxPayload else { return }
+                            exportDocument = NIOInboxDocument(json: payload)
+                            isExporting = true
+                        } label: {
+                            Image(systemName: "square.and.arrow.up")
+                        }
+                        .disabled(receiver.inboxPayload == nil)
+
+                        // 导入：从「文件」App 选择凭证 JSON 回填
+                        Button {
+                            isImporting = true
+                        } label: {
+                            Image(systemName: "square.and.arrow.down")
+                        }
+                    }
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button(role: .destructive) {
                         receiver.clearInbox()
@@ -62,6 +113,50 @@ struct NIOCredentialInboxView: View {
                     }
                     .disabled(receiver.inboxPayload == nil)
                 }
+            }
+            .fileExporter(
+                isPresented: $isExporting,
+                document: exportDocument,
+                contentType: .json,
+                defaultFilename: defaultExportFileName
+            ) { result in
+                if case .success = result {
+                    importResultText = "✅ 已导出到「文件」"
+                }
+            }
+            .fileImporter(
+                isPresented: $isImporting,
+                allowedContentTypes: [.json],
+                allowsMultipleSelection: false
+            ) { result in
+                switch result {
+                case .success(let urls):
+                    guard let url = urls.first else { return }
+                    let secured = url.startAccessingSecurityScopedResource()
+                    defer { if secured { url.stopAccessingSecurityScopedResource() } }
+                    do {
+                        let data = try Data(contentsOf: url)
+                        if receiver.importPayload(data) {
+                            importResultText = "✅ 导入成功，凭证已回填"
+                            UINotificationFeedbackGenerator().notificationOccurred(.success)
+                        } else {
+                            importResultText = "⚠️ 文件不是有效的凭证 JSON"
+                            UINotificationFeedbackGenerator().notificationOccurred(.error)
+                        }
+                    } catch {
+                        importResultText = "⚠️ 读取文件失败：\(error.localizedDescription)"
+                    }
+                case .failure:
+                    break // 用户取消
+                }
+            }
+            .alert("收件箱", isPresented: Binding(
+                get: { importResultText != nil },
+                set: { if !$0 { importResultText = nil } }
+            )) {
+                Button("好", role: .cancel) {}
+            } message: {
+                Text(importResultText ?? "")
             }
         }
         .navigationViewStyle(.stack)
