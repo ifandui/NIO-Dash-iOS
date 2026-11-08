@@ -521,7 +521,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 5.2.1;
+				MARKETING_VERSION = 5.2.0;
 				CODE_SIGN_ENTITLEMENTS = wheater/wheater.entitlements;
 				PRODUCT_BUNDLE_IDENTIFIER = com.YumikoToysRR.wheater;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -557,7 +557,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 5.2.1;
+				MARKETING_VERSION = 5.2.0;
 				CODE_SIGN_ENTITLEMENTS = wheater/wheater.entitlements;
 				PRODUCT_BUNDLE_IDENTIFIER = com.YumikoToysRR.wheater;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -586,7 +586,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 5.2.1;
+				MARKETING_VERSION = 5.2.0;
 				CODE_SIGN_ENTITLEMENTS = WheaterStatus/Extension.entitlements;
 				PRODUCT_BUNDLE_IDENTIFIER = com.YumikoToysRR.wheater.WheaterStatus;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -617,7 +617,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 5.2.1;
+				MARKETING_VERSION = 5.2.0;
 				CODE_SIGN_ENTITLEMENTS = WheaterStatus/Extension.entitlements;
 				PRODUCT_BUNDLE_IDENTIFIER = com.YumikoToysRR.wheater.WheaterStatus;
 				PRODUCT_NAME = "$(TARGET_NAME)";
