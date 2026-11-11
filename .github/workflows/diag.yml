@@ -1,0 +1,21 @@
+name: Runner Diagnostic
+on:
+  workflow_dispatch:
+
+jobs:
+  ping-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Who am I
+        run: |
+          uname -a
+          echo "runner ok"
+
+  ping-macos:
+    runs-on: macos-15
+    steps:
+      - name: Who am I
+        run: |
+          uname -a
+          sw_vers || true
+          ls -d /Applications/Xcode_26*.app 2>/dev/null || echo "no xcode 26"
